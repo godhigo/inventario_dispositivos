@@ -65,12 +65,12 @@ with tab1:
     
     productos = get_productos()
     if not productos:
-        st.warning("No hay productos en el items. Ve a 'Agregar al inventario' para crear items  y agregar stock.")
+        st.warning("No hay productos en el catálogo. Ve a 'Agregar al inventario' para crear productos y agregar stock.")
     else:
         col1, col2 = st.columns([2, 1])
         
         with col1:
-            producto_opciones = {f"{p['ref_prod']} - {p['nombre']}": p['id'] for p in productos}
+            producto_opciones = {f"{p['codigo_sku']} - {p['nombre']}": p['id'] for p in productos}
             producto_seleccionado = st.selectbox("Seleccionar producto:", options=list(producto_opciones.keys()), key="prod_select")
             producto_id = producto_opciones[producto_seleccionado]
             
@@ -122,7 +122,7 @@ with tab1:
         
         col1, col2 = st.columns(2)
         with col1:
-            folio = st.text_input("Número de Folio:", placeholder="Ej: NBX XX0-X000")
+            folio = st.text_input("Número de Folio:", placeholder="Ej: FOL-2024-001")
         with col2:
             destino = st.text_input("Destino (opcional):", placeholder="Cliente o ubicación")
         
@@ -132,7 +132,7 @@ with tab1:
             if not folio:
                 st.error("El número de folio es obligatorio.")
             elif not st.session_state.carrito:
-                st.error("Vacío")
+                st.error("El carrito está vacío. Agrega productos.")
             else:
                 try:
                     with st.spinner("Procesando envío..."):
@@ -158,9 +158,9 @@ with tab2:
     with col1:
         filtro_estado = st.selectbox("Filtrar por estado:", ["TODOS", "DISPONIBLE", "CONFIGURADO", "ENVIADO", "DEFECTUOSO"])
     with col2:
-        filtro_tipo = st.selectbox("Filtrar por tipo:", ["TODOS", "DISPOSITIVOS", "SD", "CABLE_USB", "CABLE_C", "CABLE_ETHERNET"])
+        filtro_tipo = st.selectbox("Filtrar por tipo:", ["TODOS", "RASPBERRY", "SD", "CABLE_USB", "CABLE_ETHERNET"])
     with col3:
-        search_term = st.text_input("Buscar:", placeholder="REF, nombre...")
+        search_term = st.text_input("Buscar:", placeholder="SKU, nombre...")
     
     inventario = obtener_todo_el_inventario()
     
@@ -172,12 +172,12 @@ with tab2:
         if filtro_tipo != "TODOS":
             df_inv = df_inv[df_inv['tipo'] == filtro_tipo]
         if search_term:
-            mask = (df_inv['ref_prod'].astype(str).str.contains(search_term, case=False, na=False) |
+            mask = (df_inv['codigo_sku'].astype(str).str.contains(search_term, case=False, na=False) |
                     df_inv['producto_nombre'].astype(str).str.contains(search_term, case=False, na=False))
             df_inv = df_inv[mask]
         
         st.dataframe(df_inv, use_container_width=True, hide_index=True, column_config={
-            "id": "ID", "ref_prod": "REF", "producto_nombre": "Producto", "tipo": "Tipo",
+            "id": "ID", "codigo_sku": "SKU", "producto_nombre": "Producto", "tipo": "Tipo",
             "estado": "Estado", "fecha_ingreso": "Fecha Ingreso", "config_final": "Config Final",
             "fecha_configuracion": "Fecha Config", "observaciones": "Observaciones"
         })
@@ -228,7 +228,7 @@ with tab3:
                 st.markdown("##### Items enviados:")
                 df_detalle = pd.DataFrame(detalle)
                 st.dataframe(df_detalle, use_container_width=True, hide_index=True, column_config={
-                    "producto_nombre": "Producto", "ref_prod": "REF", "tipo": "Tipo",
+                    "producto_nombre": "Producto", "codigo_sku": "SKU", "tipo": "Tipo",
                     "config_final": "Config SD", "estado": "Estado"
                 })
     else:
@@ -243,8 +243,8 @@ with tab4:
     if sds_disponibles:
         st.markdown("##### SDs disponibles para configurar:")
         df_sds = pd.DataFrame(sds_disponibles)
-        st.dataframe(df_sds[['id', 'ref_prod', 'producto_nombre', 'fecha_ingreso']], use_container_width=True, hide_index=True, column_config={
-            "id": "ID", "ref_prod": "REF", "producto_nombre": "SD", "fecha_ingreso": "Fecha Ingreso"
+        st.dataframe(df_sds[['id', 'codigo_sku', 'producto_nombre', 'fecha_ingreso']], use_container_width=True, hide_index=True, column_config={
+            "id": "ID", "codigo_sku": "SKU", "producto_nombre": "SD", "fecha_ingreso": "Fecha Ingreso"
         })
         
         st.markdown("---")
@@ -274,54 +274,33 @@ with tab4:
 with tab5:
     st.subheader("Agregar al Inventario")
     
-    with st.expander("Agregar item al inventario"):
-        # Selectbox fuera del formulario para que al cambiar rerunee
-        tipo = st.selectbox(
-            "Tipo:",
-            ["DISPOSITIVO", "SD", "CABLE_USB", "CABLE_C", "CABLE_ETHERNET"],
-            key="tipo_item"  # key opcional para evitar conflictos
-        )
-        
-        with st.form("nuevo_item"):
-            nombre = None
-            descripcion = None
+    # Expansor para crear un nuevo producto
+    with st.expander("Agregar producto al inventario"):
+        with st.form("nuevo_producto"):
+            nombre = st.text_input("Nombre del producto:", placeholder="Ej: Raspberry Pi 5 4GB")
+            tipo = st.selectbox("Tipo:", ["RASPBERRY", "SD", "CABLE_USB", "CABLE_ETHERNET", "ACCESORIO"])
+            descripcion = st.text_area("Descripción (opcional):")
             
-            if tipo == "DISPOSITIVO":
-                nombre = st.text_input("Nombre del dispositivo:", placeholder="Ej: Dispositivo PRO")
-                descripcion = st.text_area("Descripción (opcional):")
-                st.info("La referencia se generará automáticamente según el tipo de producto.")
-            else:
-                descripcion = st.text_area("Descripción (opcional):")
-                st.info("La referencia y el nombre se generarán automáticamente según el tipo de producto.")
+            st.info("El SKU se generará automáticamente según el tipo de producto.")
             
-            submitted = st.form_submit_button("Crear item")
-            
-            if submitted:
-                if tipo == "DISPOSITIVO":
-                    if not nombre:
-                        st.error("El nombre es obligatorio.")
-                    else:
-                        try:
-                            nuevo_id = crear_producto(tipo, nombre, descripcion)
-                            st.success(f"Producto '{nombre}' creado con referencia autogenerada. Ahora puedes agregar stock.")
-                            st.cache_data.clear()
-                            st.rerun()
-                        except ValueError as e:
-                            st.error(str(e))
+            if st.form_submit_button("Crear producto"):
+                if not nombre:
+                    st.error("El nombre es obligatorio.")
                 else:
                     try:
-                        nuevo_id = crear_producto(tipo, nombre, descripcion)
-                        st.success(f"Producto genérico de tipo {tipo} creado con referencia autogenerada.")
+                        nuevo_id = crear_producto(nombre, tipo, descripcion)
+                        st.success(f"Producto '{nombre}' creado con SKU autogenerado. Ahora puedes agregar stock.")
                         st.cache_data.clear()
                         st.rerun()
                     except ValueError as e:
                         st.error(str(e))
+    
     st.markdown("---")
     
     # Recepción de stock
     productos = get_productos()
     if not productos:
-        st.info("No hay items en el inventario. Utiliza el formulario de arriba para crear el primer items.")
+        st.info("No hay productos en el catálogo. Utiliza el formulario de arriba para crear el primer producto.")
     else:
         with st.expander("Agregar stock de producto existente al inventario"):
             with st.form("agregar_inventario"):
@@ -330,7 +309,7 @@ with tab5:
                     producto_seleccionado = st.selectbox(
                         "Seleccionar producto existente:",
                         options=[p['id'] for p in productos],
-                        format_func=lambda x: f"{next(p['ref_prod'] for p in productos if p['id']==x)} - {next(p['nombre'] for p in productos if p['id']==x)}"
+                        format_func=lambda x: f"{next(p['codigo_sku'] for p in productos if p['id']==x)} - {next(p['nombre'] for p in productos if p['id']==x)}"
                     )
                     cantidad = st.number_input("Cantidad a ingresar:", min_value=1, max_value=100, value=1)
                 with col2:

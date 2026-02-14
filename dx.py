@@ -24,9 +24,9 @@ def init_db():
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS productos (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ref_prod TEXT UNIQUE NOT NULL,
+                codigo_sku TEXT UNIQUE NOT NULL,
                 nombre TEXT NOT NULL,
-                tipo TEXT NOT NULL CHECK(tipo IN ('DISPOSITIVO', 'SD', 'CABLE_USB', 'CABLE_ETHERNET', 'CABLE_C')),
+                tipo TEXT NOT NULL CHECK(tipo IN ('RASPBERRY', 'SD', 'CABLE_USB', 'CABLE_ETHERNET', 'ACCESORIO')),
                 descripcion TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -97,28 +97,29 @@ def format_fecha(fecha):
         return fecha.strftime("%Y-%m-%d")
     return None
 
-def generar_ref(tipo: str) -> str:
+def generar_sku(tipo: str) -> str:
+    """Genera un SKU único basado en el tipo de producto."""
     prefijos = {
-        'DISPOSITIVO': 'DIS',
+        'RASPBERRY': 'RPI',
         'SD': 'SD',
         'CABLE_USB': 'USB',
         'CABLE_ETHERNET': 'ETH',
-        'CABLE_C': 'C'
+        'ACCESORIO': 'ACC'
     }
     prefijo = prefijos.get(tipo, 'GEN')
     
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT ref_prod FROM productos
-            WHERE ref_prod LIKE ? || '-%'
+            SELECT codigo_sku FROM productos
+            WHERE codigo_sku LIKE ? || '-%'
         """, (prefijo,))
-        existing = [row['ref_prod'] for row in cursor.fetchall()]
+        existing = [row['codigo_sku'] for row in cursor.fetchall()]
     
     max_num = 0
-    for ref in existing:
+    for sku in existing:
         try:
-            num = int(ref.split('-')[-1])
+            num = int(sku.split('-')[-1])
             if num > max_num:
                 max_num = num
         except:
@@ -128,23 +129,22 @@ def generar_ref(tipo: str) -> str:
     return f"{prefijo}-{nuevo_num:03d}"
 
 # ========== GESTIÓN DE PRODUCTOS ==========
-def crear_producto(tipo: str, nombre: Optional[str] = None, descripcion: str = "", ref: Optional[str] = None):
-    if ref is None:
-        ref = generar_ref(tipo)
-    if nombre is None:
-        nombre = f"{tipo}"
+def crear_producto(nombre: str, tipo: str, descripcion: str = "", sku: Optional[str] = None):
+    """Crea un nuevo producto en el catálogo. Si no se proporciona SKU, se genera automáticamente."""
+    if sku is None:
+        sku = generar_sku(tipo)
     
     with get_connection() as conn:
         cursor = conn.cursor()
         try:
             cursor.execute("""
-                INSERT INTO productos (ref_prod, tipo, nombre, descripcion)
+                INSERT INTO productos (codigo_sku, nombre, tipo, descripcion)
                 VALUES (?, ?, ?, ?)
-            """, (ref, tipo, nombre, descripcion))
+            """, (sku, nombre, tipo, descripcion))
             conn.commit()
             return cursor.lastrowid
         except sqlite3.IntegrityError:
-            raise ValueError(f"Ya existe un producto con REF '{ref}'")
+            raise ValueError(f"Ya existe un producto con SKU '{sku}'")
 
 def get_productos():
     """Obtiene todos los productos del catálogo"""
@@ -177,7 +177,7 @@ def obtener_stock_disponible(producto_id: Optional[int] = None, tipo: Optional[s
         cursor = conn.cursor()
         
         query = """
-            SELECT i.*, p.nombre as producto_nombre, p.ref_prod, p.tipo,
+            SELECT i.*, p.nombre as producto_nombre, p.codigo_sku, p.tipo,
                    sc.config_final, sc.fecha_configuracion
             FROM inventario i
             JOIN productos p ON i.producto_id = p.id
@@ -203,7 +203,7 @@ def obtener_todo_el_inventario():
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT i.*, p.nombre as producto_nombre, p.ref_prod, p.tipo,
+            SELECT i.*, p.nombre as producto_nombre, p.codigo_sku, p.tipo,
                    sc.config_final, sc.fecha_configuracion
             FROM inventario i
             JOIN productos p ON i.producto_id = p.id
@@ -339,7 +339,7 @@ def get_detalle_envio(envio_id: int):
         cursor = conn.cursor()
         cursor.execute("""
             SELECT ed.*, i.numero_serie, i.estado,
-                   p.nombre as producto_nombre, p.ref_prod, p.tipo,
+                   p.nombre as producto_nombre, p.codigo_sku, p.tipo,
                    sc.config_final
             FROM envio_detalle ed
             JOIN inventario i ON ed.inventario_id = i.id
@@ -364,7 +364,7 @@ def get_metricas():
         """)
         stock_por_tipo = {row['tipo']: row['cantidad'] for row in cursor.fetchall()}
         
-        metricas['dispositivos_disponibles'] = stock_por_tipo.get('DISPOSITIVO', 0)
+        metricas['raspberries_disponibles'] = stock_por_tipo.get('RASPBERRY', 0)
         metricas['sds_disponibles'] = stock_por_tipo.get('SD', 0)
         metricas['cables_usb_disponibles'] = stock_por_tipo.get('CABLE_USB', 0)
         metricas['cables_eth_disponibles'] = stock_por_tipo.get('CABLE_ETHERNET', 0)
