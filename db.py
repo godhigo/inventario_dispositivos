@@ -37,14 +37,20 @@ def init_db():
             CREATE TABLE IF NOT EXISTS inventario (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 producto_id INTEGER NOT NULL,
-                numero_serie TEXT,
                 estado TEXT NOT NULL DEFAULT 'DISPONIBLE' 
                     CHECK(estado IN ('DISPONIBLE', 'CONFIGURADO', 'ENVIADO', 'DEFECTUOSO')),
                 fecha_ingreso DATE NOT NULL,
+                observaciones TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (producto_id) REFERENCES productos(id) ON DELETE RESTRICT
             )
         """)
+
+        # Verificar si la columna observaciones ya existe (por si se ejecuta sobre una DB existente)
+        cursor.execute("PRAGMA table_info(inventario)")
+        columns = [col[1] for col in cursor.fetchall()]
+        if 'observaciones' not in columns:
+            cursor.execute("ALTER TABLE inventario ADD COLUMN observaciones TEXT")
 
         # ===== CONFIGURACIONES DE SD =====
         cursor.execute("""
@@ -199,12 +205,20 @@ def obtener_stock_disponible(producto_id: Optional[int] = None, tipo: Optional[s
         return [dict(row) for row in cursor.fetchall()]
 
 def obtener_todo_el_inventario():
-    """Obtiene todo el inventario con su estado actual"""
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT i.*, p.nombre as producto_nombre, p.ref_prod, p.tipo,
-                   sc.config_final, sc.fecha_configuracion
+            SELECT 
+                i.id,
+                i.estado,
+                i.fecha_ingreso,
+
+                p.nombre AS producto_nombre,
+                p.ref_prod,
+                p.tipo,
+
+                sc.config_final,
+                sc.fecha_configuracion
             FROM inventario i
             JOIN productos p ON i.producto_id = p.id
             LEFT JOIN sd_configuraciones sc ON i.id = sc.inventario_id
@@ -248,6 +262,37 @@ def configurar_sd(inventario_id: int, config_final=None):
         
         conn.commit()
         return True
+
+# ========== FUNCIONES PARA EDITAR/ELIMinar EN INVENTARIO ==========
+def actualizar_item_inventario(item_id, estado=None, observaciones=None):
+    """Actualiza los campos editables de un item del inventario"""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        updates = []
+        params = []
+        if estado is not None:
+            updates.append("estado = ?")
+            params.append(estado)
+        if observaciones is not None:
+            updates.append("observaciones = ?")
+            params.append(observaciones)
+        if not updates:
+            return False
+        params.append(item_id)
+        cursor.execute(f"UPDATE inventario SET {', '.join(updates)} WHERE id = ?", params)
+        conn.commit()
+        return cursor.rowcount > 0
+
+def eliminar_item_inventario(item_id):
+    """Elimina un item del inventario siempre que no esté referenciado en envíos"""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("DELETE FROM inventario WHERE id = ?", (item_id,))
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            raise ValueError("No se puede eliminar el item porque está asociado a un envío o configuración.")
 
 # ========== PROCESAMIENTO DE ENVÍOS ==========
 def procesar_envio(items: list, folio: str, destino: str = "", descripcion: str = "", fecha_salida=None):
@@ -338,7 +383,7 @@ def get_detalle_envio(envio_id: int):
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT ed.*, i.numero_serie, i.estado,
+            SELECT ed.*, i.estado,
                    p.nombre as producto_nombre, p.ref_prod, p.tipo,
                    sc.config_final
             FROM envio_detalle ed

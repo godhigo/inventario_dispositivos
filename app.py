@@ -158,7 +158,7 @@ with tab2:
     with col1:
         filtro_estado = st.selectbox("Filtrar por estado:", ["TODOS", "DISPONIBLE", "CONFIGURADO", "ENVIADO", "DEFECTUOSO"])
     with col2:
-        filtro_tipo = st.selectbox("Filtrar por tipo:", ["TODOS", "DISPOSITIVOS", "SD", "CABLE_USB", "CABLE_C", "CABLE_ETHERNET"])
+        filtro_tipo = st.selectbox("Filtrar por tipo:", ["TODOS", "DISPOSITIVO", "SD", "CABLE_USB", "CABLE_C", "CABLE_ETHERNET"])
     with col3:
         search_term = st.text_input("Buscar:", placeholder="REF, nombre...")
     
@@ -191,6 +191,80 @@ with tab2:
         with col3:
             configurados = len(df_inv[df_inv['estado'] == 'CONFIGURADO'])
             st.warning(f"{configurados} configurados")
+
+        # ---------- Editar / Eliminar Items ----------
+        with st.expander("Editar o Eliminar Item"):
+            if not inventario:
+                st.info("No hay items en el inventario")
+            else:
+                # Usar el DataFrame filtrado para mostrar solo los IDs visibles
+                ids_disponibles = df_inv['id'].tolist()
+                if ids_disponibles:
+                    selected_id = st.selectbox("Seleccionar ID del item:", ids_disponibles)
+                    item_data = df_inv[df_inv['id'] == selected_id].iloc[0].to_dict()
+
+                    with st.form("editar_item"):
+                        st.write(f"**Editando item ID:** {selected_id}")
+                        nuevo_estado = st.selectbox(
+                            "Estado",
+                            ["DISPONIBLE", "CONFIGURADO", "ENVIADO", "DEFECTUOSO"],
+                            index=["DISPONIBLE", "CONFIGURADO", "ENVIADO", "DEFECTUOSO"].index(item_data['estado'])
+                        )
+                        nuevas_obs = st.text_area("Observaciones", value=item_data.get('observaciones', ''))
+
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            actualizar = st.form_submit_button("Actualizar")
+                        with col2:
+                            eliminar = st.form_submit_button("Eliminar")
+
+                    if actualizar:
+                        try:
+                            actualizar_item_inventario(
+                                selected_id,
+                                estado=nuevo_estado,
+                                observaciones=nuevas_obs,
+                            )
+                            st.success("Item actualizado correctamente")
+                            st.cache_data.clear()
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error al actualizar: {e}")
+
+                    if eliminar:
+                        # Usar un checkbox de confirmación dentro del flujo del formulario
+                        # (No se puede usar st.checkbox directamente dentro del form si se quiere evitar recarga)
+                        # Mejor usar un estado de sesión para confirmar
+                        if 'confirm_delete' not in st.session_state:
+                            st.session_state.confirm_delete = False
+                        
+                        if not st.session_state.confirm_delete:
+                            if st.button("Confirmar eliminación", key="confirm_btn"):
+                                st.session_state.confirm_delete = True
+                                st.rerun()
+                        else:
+                            st.warning("¿Estás seguro? Esta acción no se puede deshacer.")
+                            col_si, col_no = st.columns(2)
+                            with col_si:
+                                if st.button("Sí, eliminar", key="delete_yes"):
+                                    try:
+                                        eliminar_item_inventario(selected_id)
+                                        st.success("Item eliminado")
+                                        st.session_state.confirm_delete = False
+                                        st.cache_data.clear()
+                                        st.rerun()
+                                    except ValueError as e:
+                                        st.error(str(e))
+                                        st.session_state.confirm_delete = False
+                                    except Exception as e:
+                                        st.error(f"Error al eliminar: {e}")
+                                        st.session_state.confirm_delete = False
+                            with col_no:
+                                if st.button("No, cancelar", key="delete_no"):
+                                    st.session_state.confirm_delete = False
+                                    st.rerun()
+                else:
+                    st.warning("No hay items en la vista filtrada")
     else:
         st.info("No hay items en el inventario")
 
