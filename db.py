@@ -38,7 +38,7 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 producto_id INTEGER NOT NULL,
                 estado TEXT NOT NULL DEFAULT 'DISPONIBLE' 
-                    CHECK(estado IN ('DISPONIBLE', 'EN PROCESO', 'CONFIGURADO', 'ENVIADO', 'DEFECTUOSO')),
+                    CHECK(estado IN ('DISPONIBLE', 'REINICIADO', 'CONFIGURADO', 'ENVIADO', 'DEFECTUOSO')),
                 fecha_ingreso DATE NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (producto_id) REFERENCES productos(id) ON DELETE RESTRICT
@@ -65,7 +65,6 @@ def init_db():
                 inventario_id INTEGER NOT NULL UNIQUE,
                 fecha_config_inicio DATE NOT NULL,
                 fecha_config_final DATE,
-                configuracion_realizada TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (inventario_id) REFERENCES inventario(id) ON DELETE CASCADE
             )
@@ -238,7 +237,7 @@ def obtener_todo_el_inventario():
             ORDER BY 
                 CASE i.estado 
                     WHEN 'DISPONIBLE' THEN 1
-                    WHEN 'EN PROCESO' THEN 2
+                    WHEN 'REINICIADO' THEN 2
                     WHEN 'CONFIGURADO' THEN 3
                     WHEN 'ENVIADO' THEN 4
                     ELSE 5
@@ -273,13 +272,13 @@ def iniciar_configuracion_dispositivo(inventario_id: int, fecha_config_inicio):
         """, (inventario_id, format_fecha(fecha_config_inicio)))
         
         cursor.execute("""
-            UPDATE inventario SET estado = 'EN PROCESO' WHERE id = ?
+            UPDATE inventario SET estado = 'REINICIADO' WHERE id = ?
         """, (inventario_id,))
         
         conn.commit()
         return True
 
-def finalizar_configuracion_dispositivo(inventario_id: int, fecha_config_final=None, config_realizada=""):
+def finalizar_configuracion_dispositivo(inventario_id: int, fecha_config_final=None):
     """Finaliza la configuración de un dispositivo"""
     with get_connection() as conn:
         cursor = conn.cursor()
@@ -287,21 +286,19 @@ def finalizar_configuracion_dispositivo(inventario_id: int, fecha_config_final=N
         # Verificar que el dispositivo está en configuración
         cursor.execute("""
             SELECT i.* FROM inventario i
-            WHERE i.id = ? AND i.estado = 'EN PROCESO'
+            WHERE i.id = ? AND i.estado = 'REINICIADO'
         """, (inventario_id,))
         
         item = cursor.fetchone()
         if not item:
-            raise ValueError("El dispositivo no está en proceso de configuración")
+            raise ValueError("El dispositivo no está en proceso de reinicio")
         
         # Actualizar configuración
         cursor.execute("""
             UPDATE dispositivo_configuraciones 
-            SET fecha_config_final = ?,
-                configuracion_realizada = ?
+            SET fecha_config_final = ?
             WHERE inventario_id = ?
-        """, (format_fecha(fecha_config_final) if fecha_config_final else None, 
-              config_realizada, inventario_id))
+        """, (format_fecha(fecha_config_final) if fecha_config_final else None,  inventario_id))
         
         # Cambiar estado a configurado
         cursor.execute("""
@@ -518,7 +515,7 @@ def get_metricas():
         metricas['cables_usb_disponibles'] = stock_por_tipo.get('CABLE_USB', 0)
         metricas['cables_eth_disponibles'] = stock_por_tipo.get('CABLE_ETHERNET', 0)
         
-        cursor.execute("SELECT COUNT(*) FROM inventario WHERE estado IN ('DISPONIBLE', 'EN PROCESO', 'CONFIGURADO')")
+        cursor.execute("SELECT COUNT(*) FROM inventario WHERE estado IN ('DISPONIBLE', 'REINICIADO', 'CONFIGURADO')")
         metricas['total_en_inventario'] = cursor.fetchone()[0]
         
         cursor.execute("SELECT COUNT(*) FROM envios")
@@ -531,6 +528,6 @@ def get_metricas():
         metricas['dispositivos_configurados'] = cursor.fetchone()[0]
         
         cursor.execute("SELECT COUNT(*) FROM dispositivo_configuraciones WHERE fecha_config_final IS NULL")
-        metricas['dispositivos_en_configuracion'] = cursor.fetchone()[0]
+        metricas['dispositivos_reiniciados'] = cursor.fetchone()[0]
         
         return metricas

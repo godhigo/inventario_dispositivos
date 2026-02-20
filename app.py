@@ -47,7 +47,7 @@ with st.sidebar:
         <div style='display: flex; justify-content: space-between; margin: 8px 0;'><strong>Envios realizados:</strong> <span>{metricas['total_envios']}</span></div>
         <div style='display: flex; justify-content: space-between; margin: 8px 0;'><strong>SDs configuradas:</strong> <span>{metricas['sds_configuradas']}</span></div>
         <div style='display: flex; justify-content: space-between; margin: 8px 0;'><strong>Dispositivos configurados:</strong> <span>{metricas.get('dispositivos_configurados', 0)}</span></div>
-        <div style='display: flex; justify-content: space-between; margin: 8px 0;'><strong>En configuración:</strong> <span>{metricas.get('dispositivos_en_configuracion', 0)}</span></div>
+        <div style='display: flex; justify-content: space-between; margin: 8px 0;'><strong>Dispositivos reiniciados:</strong> <span>{metricas.get('dispositivos_reiniciados', 0)}</span></div>
     </div>
     """, unsafe_allow_html=True)
     
@@ -64,8 +64,8 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "Inventario Fisico",
     "Historial de Envios",
     "Configurar SD",
-    "Agregar al inventario",
-    "Configurar Dispositivos"
+    "Configurar Dispositivos",
+    "Agregar al inventario"
 ])
 
 # ========== TAB 1: REALIZAR ENVIO ==========
@@ -165,7 +165,7 @@ with tab2:
     
     col1, col2, col3 = st.columns(3)
     with col1:
-        filtro_estado = st.selectbox("Filtrar por estado:", ["TODOS", "DISPONIBLE", "EN PROCESO", "CONFIGURADO", "ENVIADO", "DEFECTUOSO"])
+        filtro_estado = st.selectbox("Filtrar por estado:", ["TODOS", "DISPONIBLE", "REINICIADO", "CONFIGURADO", "ENVIADO", "DEFECTUOSO"])
     with col2:
         filtro_tipo = st.selectbox("Filtrar por tipo:", ["TODOS", "DISPOSITIVO", "SD", "CABLE_USB", "CABLE_C", "CABLE_ETHERNET"])
     with col3:
@@ -189,7 +189,7 @@ with tab2:
         def color_estado(val):
             colors = {
                 'DISPONIBLE': 'color: #17a2b8',
-                'EN PROCESO': 'color: #ffc107',
+                'REINICIADO': 'color: #ffc107',
                 'CONFIGURADO': 'color: #28a745',
                 'ENVIADO': 'color: white',
                 'DEFECTUOSO': 'color: #dc3545'
@@ -218,8 +218,8 @@ with tab2:
             disponibles = len(df_inv[df_inv['estado'] == 'DISPONIBLE'])
             st.success(f"{disponibles} disponibles")
         with col3:
-            en_proceso = len(df_inv[df_inv['estado'] == 'EN PROCESO'])
-            st.warning(f"{en_proceso} en configuración")
+            st_reiniciado = len(df_inv[df_inv['estado'] == 'REINICIADO'])
+            st.warning(f"{st_reiniciado} en reinicio")
         with col4:
             configurados = len(df_inv[df_inv['estado'] == 'CONFIGURADO'])
             st.info(f"{configurados} configurados")
@@ -242,9 +242,9 @@ with tab2:
                             st.write(f"**Editando item ID:** {selected_id}")
                             nuevo_estado = st.selectbox(
                                 "Estado",
-                                ["DISPONIBLE", "EN PROCESO", "CONFIGURADO", "DEFECTUOSO"],
-                                index=["DISPONIBLE", "EN PRCESO", "CONFIGURADO", "DEFECTUOSO"].index(item_data['estado']) 
-                                if item_data['estado'] in ["DISPONIBLE", "EN PROCESO", "CONFIGURADO", "DEFECTUOSO"] else 0
+                                ["DISPONIBLE", "REINICIADO", "CONFIGURADO", "DEFECTUOSO"],
+                                index=["DISPONIBLE", "REINICIADO", "CONFIGURADO", "DEFECTUOSO"].index(item_data['estado']) 
+                                if item_data['estado'] in ["DISPONIBLE", "REINICIADO", "CONFIGURADO", "DEFECTUOSO"] else 0
                             )
 
                             col1, col2 = st.columns(2)
@@ -392,74 +392,8 @@ with tab4:
     else:
         st.warning("No hay SDs disponibles para configurar")
 
-# ========== TAB 5: RECEPCION DE MERCANCIA ==========
+# ========== TAB 5: CONFIGURAR DISPOSITIVOS ==========
 with tab5:
-    st.subheader("Agregar al Inventario")
-    
-    with st.expander("Crear nuevo producto", expanded=False):
-        tipo = st.selectbox(
-            "Tipo de producto:",
-            ["DISPOSITIVO", "SD", "CABLE_USB", "CABLE_C", "CABLE_ETHERNET"],
-            key="tipo_item"
-        )
-        
-        with st.form("nuevo_item"):
-            nombre = None
-            descripcion = None
-            
-            if tipo == "DISPOSITIVO":
-                nombre = st.text_input("Nombre del dispositivo:", placeholder="Ej: Dispositivo PRO")
-                descripcion = st.text_area("Descripción (opcional):")
-                st.info("La referencia se generará automáticamente según el tipo de producto.")
-            else:
-                descripcion = st.text_area("Descripción (opcional):")
-                st.info("La referencia y el nombre se generarán automáticamente según el tipo de producto.")
-            
-            submitted = st.form_submit_button("Crear producto")
-            
-            if submitted:
-                if tipo == "DISPOSITIVO" and not nombre:
-                    st.error("El nombre es obligatorio para dispositivos.")
-                else:
-                    try:
-                        nuevo_id = crear_producto(tipo, nombre, descripcion)
-                        st.success(f"Producto creado con referencia autogenerada. Ahora puedes agregar stock.")
-                        st.cache_data.clear()
-                        st.rerun()
-                    except ValueError as e:
-                        st.error(str(e))
-    
-    st.markdown("---")
-    
-    # Recepción de stock
-    productos = get_productos()
-    if not productos:
-        st.info("No hay productos en el catálogo. Utiliza el formulario de arriba para crear el primer producto.")
-    else:
-        with st.expander("Agregar stock al inventario", expanded=True):
-            with st.form("agregar_inventario"):
-                col1, col2 = st.columns(2)
-                with col1:
-                    producto_seleccionado = st.selectbox(
-                        "Seleccionar producto:",
-                        options=[p['id'] for p in productos],
-                        format_func=lambda x: f"{next(p['ref_prod'] for p in productos if p['id']==x)} - {next(p['nombre'] for p in productos if p['id']==x)}"
-                    )
-                    cantidad = st.number_input("Cantidad a ingresar:", min_value=1, max_value=100, value=1)
-                with col2:
-                    fecha_ingreso = st.date_input("Fecha de ingreso:", value=datetime.now().date())
-                
-                if st.form_submit_button("Registrar Ingreso"):
-                    try:
-                        ids = agregar_producto_a_inventario(producto_seleccionado, cantidad, fecha_ingreso)
-                        st.success(f"{cantidad} unidad(es) agregada(s) al inventario exitosamente")
-                        st.cache_data.clear()
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Error: {str(e)}")
-
-# ========== TAB 6: CONFIGURAR DISPOSITIVOS ==========
-with tab6:
     st.subheader("Configuración de Dispositivos")
     
     # Obtener dispositivos en diferentes estados
@@ -471,88 +405,92 @@ with tab6:
     else:
         # Separar por estados
         disponibles = [d for d in dispositivos if d['estado'] == 'DISPONIBLE']
-        en_configuracion = [d for d in dispositivos if d['estado'] == 'EN PROCESO']
+        reiniciado = [d for d in dispositivos if d['estado'] == 'REINICIADO']
         configurados = [d for d in dispositivos if d['estado'] == 'CONFIGURADO']
-        enviados = [d for d in dispositivos if d['estado'] == 'ENVIADO']
+        defectuosos = [d for d in dispositivos if d['estado'] == 'DEFECTUOSO']
         
         # Mostrar resumen
         col1, col2, col3, col4 = st.columns(4)
         with col1:
             st.info(f"Disponibles: {len(disponibles)}")
         with col2:
-            st.warning(f"En configuración: {len(en_configuracion)}")
+            st.warning(f"Reiniciados: {len(reiniciado)}")
         with col3:
             st.success(f"Configurados: {len(configurados)}")
         with col4:
-            st.error(f"Enviados: {len(enviados)}")
+            st.error(f"Defectuosos: {len(defectuosos)}")
         
         st.markdown("---")
         
-        # Sección para iniciar configuración
-        if disponibles:
-            with st.expander("Iniciar Configuración de Dispositivo", expanded=False):
-                st.markdown("### Iniciar Configuración de Dispositivo")
-                st.markdown('<div class="info-box">Selecciona un dispositivo disponible para comenzar su configuración</div>', unsafe_allow_html=True)
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    dispositivo_inicio = st.selectbox(
-                        "Dispositivo disponible:",
-                        options=[d['id'] for d in disponibles],
-                        format_func=lambda x: f"ID {x} - {next(d['ref_prod'] for d in disponibles if d['id']==x)} - {next(d['producto_nombre'] for d in disponibles if d['id']==x)}",
-                        key="inicio_config"
-                    )
-                with col2:
-                    fecha_inicio = st.date_input("Fecha de inicio de configuración:", value=datetime.now().date(), key="fecha_inicio")
-                
-                if st.button("Iniciar Configuración", use_container_width=True, type="primary"):
-                    try:
-                        iniciar_configuracion_dispositivo(dispositivo_inicio, fecha_inicio)
-                        st.success("Configuración iniciada correctamente")
-                        st.cache_data.clear()
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Error: {str(e)}")
-                
-        st.markdown("---")
+        # Sección de reinicio
+        col1, col2 = st.columns(2)
+        with col1:
+            if disponibles:
+                with st.expander("Reinicio de Dispositivo", expanded=True):
+                    st.markdown("### Iniciar Reinicio de Dispositivo")
+                    st.info('Selecciona un dispositivo disponible para comenzar su reinicio')
+                    col_left, col_right = st.columns(2)
+                    with col_left:
+                        dispositivo_inicio = st.selectbox(
+                            "Dispositivo(s) disponible(s):",
+                            options=[d['id'] for d in disponibles],
+                            format_func=lambda x: f"ID {x} - {next(d['ref_prod'] for d in disponibles if d['id']==x)} - {next(d['producto_nombre'] for d in disponibles if d['id']==x)}",
+                            key="inicio_config"
+                        )
+                    with col_right:
+                        fecha_reinicio = st.date_input("Fecha de reinicio:", value=datetime.now().date(), key="fecha_reinicio")
+                    
+                    if st.button("Reiniciar Dispositivo", use_container_width=True, type="primary"):
+                        try:
+                            iniciar_configuracion_dispositivo(dispositivo_inicio, fecha_reinicio)
+                            st.success("Dispositivo reiniciado correctamente")
+                            st.cache_data.clear()
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error: {str(e)}")
+            else:
+                st.error("No hay dispositivos disponibles para reiniciar") 
         
         # Sección para finalizar configuración
-        if en_configuracion:
-            st.markdown("### Finalizar Configuración de Dispositivo")
-            st.markdown('<div class="info-box">Completa la configuración del dispositivo. La fecha final es obligatoria para poder enviarlo después.</div>', unsafe_allow_html=True)
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                dispositivo_fin = st.selectbox(
-                    "Dispositivo en configuración:",
-                    options=[d['id'] for d in en_configuracion],
-                    format_func=lambda x: f"ID {x} - {next(d['ref_prod'] for d in en_configuracion if d['id']==x)} - Inicio: {next(d['disp_fecha_config_inicio'] for d in en_configuracion if d['id']==x)}",
-                    key="fin_config"
-                )
-            with col2:
-                fecha_fin = st.date_input("Fecha de finalización (obligatoria):", value=datetime.now().date(), key="fecha_fin")
-            
-            config_realizada = st.text_area("Configuración realizada (opcional):", placeholder="Detalles de la configuración aplicada...")
-            
-            if st.button("Finalizar Configuración", use_container_width=True, type="primary"):
-                if not fecha_fin:
-                    st.error("La fecha de finalización es obligatoria")
-                else:
-                    try:
-                        finalizar_configuracion_dispositivo(dispositivo_fin, fecha_fin, config_realizada)
-                        st.success("Configuración finalizada correctamente. Dispositivo marcado como CONFIGURADO")
-                        st.cache_data.clear()
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Error: {str(e)}")
-            
-            st.markdown("---")
+        with col2:
+            if reiniciado:
+                with st.expander("Configurar Dispositivo Reiniciado", expanded=True):
+                    st.markdown("### Finalizar Configuración de Dispositivo")
+                    
+                    st.info('Completa la configuración del dispositivo')
+                    
+                    colLeft, colRight = st.columns(2)
+                    with colLeft:
+                        dispositivo_fin = st.selectbox(
+                            "Dispositivo reiniciado:",
+                            options=[d['id'] for d in reiniciado],
+                            format_func=lambda x: f"ID {x} - {next(d['ref_prod'] for d in reiniciado if d['id']==x)} - Inicio: {next(d['disp_fecha_config_inicio'] for d in reiniciado if d['id']==x)}",
+                            key="fin_config"
+                        )
+                    with colRight:
+                        fecha_fin = st.date_input("Fecha de finalización (obligatoria):", value=datetime.now().date(), key="fecha_fin")
+                    
+                    if st.button("Finalizar Configuración", use_container_width=True, type="primary"):
+                        if not fecha_fin:
+                            st.error("La fecha de finalización es obligatoria")
+                        else:
+                            try:
+                                finalizar_configuracion_dispositivo(dispositivo_fin, fecha_fin)
+                                st.success("Configuración finalizada correctamente. Dispositivo marcado como CONFIGURADO")
+                                st.cache_data.clear()
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error: {str(e)}")
+            else:
+                st.error("No hay dispositivos en proceso de configuración para finalizar")
         
-        # Tabla de dispositivos en configuración
-        if en_configuracion:
-            st.markdown("### Dispositivos en Proceso de Configuración")
-            df_en_config = pd.DataFrame(en_configuracion)
-            st.dataframe(df_en_config[['id', 'ref_prod', 'producto_nombre', 'disp_fecha_config_inicio']], 
+        st.markdown("---")
+        
+        # Tabla de dispositivos reiniciados
+        if reiniciado:
+            st.markdown("### Dispositivos Reiniciados")
+            dv_reiniciado = pd.DataFrame(reiniciado)
+            st.dataframe(dv_reiniciado[['id', 'ref_prod', 'producto_nombre', 'disp_fecha_config_inicio']], 
                         use_container_width=True, hide_index=True,
                         column_config={
                             "id": "ID",
@@ -574,3 +512,67 @@ with tab6:
                             "disp_fecha_config_inicio": "Inicio Config",
                             "disp_fecha_config_final": "Fin Config",
                         })
+
+# ========== TAB 6: AGREGAR AL INVENTARIO ==========
+with tab6:
+    st.subheader("Agregar al Inventario")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        with st.expander("Crear nuevo producto", expanded=True):
+            tipo = st.selectbox(
+                "Tipo de producto:",
+                ["DISPOSITIVO", "SD", "CABLE_USB", "CABLE_C", "CABLE_ETHERNET"],
+                key="tipo_item"
+            )
+            
+            with st.form("nuevo_item"):
+                nombre = None
+                descripcion = None
+                
+                if tipo == "DISPOSITIVO":
+                    nombre = st.text_input("Nombre del dispositivo:", placeholder="Ej: Dispositivo PRO")
+                    st.info("La referencia se generará automáticamente según el tipo de producto.")
+                else:
+                    st.info("La referencia y el nombre se generarán automáticamente según el tipo de producto.")
+                
+                submitted = st.form_submit_button("Crear producto")
+                
+                if submitted:
+                    if tipo == "DISPOSITIVO" and not nombre:
+                        st.error("El nombre es obligatorio para dispositivos.")
+                    else:
+                        try:
+                            nuevo_id = crear_producto(tipo, nombre, descripcion)
+                            st.success(f"Producto creado con referencia autogenerada. Ahora puedes agregar stock.")
+                            st.cache_data.clear()
+                            st.rerun()
+                        except ValueError as e:
+                            st.error(str(e))
+        
+        with col2:
+        # Agregar a stock
+            productos = get_productos()
+            if not productos:
+                st.info("No hay productos en el catálogo. Utiliza el formulario de arriba para crear el primer producto.")
+            else:
+                with st.expander("Agregar stock al inventario", expanded=True):
+                    with st.form("agregar_inventario"):
+                        producto_seleccionado = st.selectbox(
+                                "Seleccionar producto:",
+                                options=[p['id'] for p in productos],
+                                format_func=lambda x: f"{next(p['ref_prod'] for p in productos if p['id']==x)} - {next(p['nombre'] for p in productos if p['id']==x)}"
+                            )
+                        cantidad = st.number_input("Cantidad a ingresar:", min_value=1, max_value=100, value=1)
+                        fecha_ingreso = st.date_input("Fecha de ingreso:", value=datetime.now().date())
+                        
+                        if st.form_submit_button("Registrar Ingreso"):
+                            try:
+                                ids = agregar_producto_a_inventario(producto_seleccionado, cantidad, fecha_ingreso)
+                                st.success(f"{cantidad} unidad(es) agregada(s) al inventario exitosamente")
+                                st.cache_data.clear()
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error: {str(e)}")
+
+st.markdown("---")
