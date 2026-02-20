@@ -38,19 +38,12 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 producto_id INTEGER NOT NULL,
                 estado TEXT NOT NULL DEFAULT 'DISPONIBLE' 
-                    CHECK(estado IN ('DISPONIBLE', 'CONFIGURADO', 'ENVIADO', 'DEFECTUOSO')),
+                    CHECK(estado IN ('DISPONIBLE', 'EN PROCESO', 'CONFIGURADO', 'ENVIADO', 'DEFECTUOSO')),
                 fecha_ingreso DATE NOT NULL,
-                observaciones TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (producto_id) REFERENCES productos(id) ON DELETE RESTRICT
             )
         """)
-
-        # Verificar si la columna observaciones ya existe (por si se ejecuta sobre una DB existente)
-        cursor.execute("PRAGMA table_info(inventario)")
-        columns = [col[1] for col in cursor.fetchall()]
-        if 'observaciones' not in columns:
-            cursor.execute("ALTER TABLE inventario ADD COLUMN observaciones TEXT")
 
         # ===== CONFIGURACIONES DE SD =====
         cursor.execute("""
@@ -60,6 +53,19 @@ def init_db():
                 config_final DATE,
                 fecha_configuracion DATE NOT NULL,
                 imagen_quemada TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (inventario_id) REFERENCES inventario(id) ON DELETE CASCADE
+            )
+        """)
+
+        # ===== CONFIGURACIONES DE DISPOSITIVOS =====
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS dispositivo_configuraciones (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                inventario_id INTEGER NOT NULL UNIQUE,
+                fecha_config_inicio DATE NOT NULL,
+                fecha_config_final DATE,
+                configuracion_realizada TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (inventario_id) REFERENCES inventario(id) ON DELETE CASCADE
             )
@@ -93,6 +99,7 @@ def init_db():
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_inventario_producto ON inventario(producto_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_envios_folio ON envios(folio)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_sd_config_inventario ON sd_configuraciones(inventario_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_disp_config_inventario ON dispositivo_configuraciones(inventario_id)")
         
         conn.commit()
 
@@ -184,10 +191,12 @@ def obtener_stock_disponible(producto_id: Optional[int] = None, tipo: Optional[s
         
         query = """
             SELECT i.*, p.nombre as producto_nombre, p.ref_prod, p.tipo,
-                   sc.config_final, sc.fecha_configuracion
+                   sc.config_final, sc.fecha_configuracion as sd_fecha_config,
+                   dc.fecha_config_inicio, dc.fecha_config_final as disp_fecha_config_final
             FROM inventario i
             JOIN productos p ON i.producto_id = p.id
             LEFT JOIN sd_configuraciones sc ON i.id = sc.inventario_id
+            LEFT JOIN dispositivo_configuraciones dc ON i.id = dc.inventario_id
             WHERE i.estado = 'DISPONIBLE'
         """
         params = []
@@ -217,21 +226,90 @@ def obtener_todo_el_inventario():
                 p.ref_prod,
                 p.tipo,
 
-                sc.config_final,
-                sc.fecha_configuracion
+                sc.config_final as sd_config_final,
+                sc.fecha_configuracion as sd_fecha_config,
+
+                dc.fecha_config_inicio as disp_fecha_config_inicio,
+                dc.fecha_config_final as disp_fecha_config_final
             FROM inventario i
             JOIN productos p ON i.producto_id = p.id
             LEFT JOIN sd_configuraciones sc ON i.id = sc.inventario_id
+            LEFT JOIN dispositivo_configuraciones dc ON i.id = dc.inventario_id
             ORDER BY 
                 CASE i.estado 
                     WHEN 'DISPONIBLE' THEN 1
-                    WHEN 'CONFIGURADO' THEN 2
-                    WHEN 'ENVIADO' THEN 3
-                    ELSE 4
+                    WHEN 'EN PROCESO' THEN 2
+                    WHEN 'CONFIGURADO' THEN 3
+                    WHEN 'ENVIADO' THEN 4
+                    ELSE 5
                 END,
                 i.fecha_ingreso DESC
         """)
         return [dict(row) for row in cursor.fetchall()]
+
+def iniciar_configuracion_dispositivo(inventario_id: int, fecha_config_inicio):
+    """Inicia el proceso de configuración de un dispositivo"""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        
+        # Verificar que el item existe y es un dispositivo disponible
+        cursor.execute("""
+            SELECT i.*, p.tipo FROM inventario i
+            JOIN productos p ON i.producto_id = p.id
+            WHERE i.id = ? AND i.estado = 'DISPONIBLE'
+        """, (inventario_id,))
+        
+        item = cursor.fetchone()
+        if not item:
+            raise ValueError("El item no existe o no está disponible")
+        
+        if item['tipo'] != 'DISPOSITIVO':
+            raise ValueError("Solo se pueden configurar dispositivos")
+        
+        # Registrar inicio de configuración y cambiar estado
+        cursor.execute("""
+            INSERT INTO dispositivo_configuraciones (inventario_id, fecha_config_inicio)
+            VALUES (?, ?)
+        """, (inventario_id, format_fecha(fecha_config_inicio)))
+        
+        cursor.execute("""
+            UPDATE inventario SET estado = 'EN PROCESO' WHERE id = ?
+        """, (inventario_id,))
+        
+        conn.commit()
+        return True
+
+def finalizar_configuracion_dispositivo(inventario_id: int, fecha_config_final=None, config_realizada=""):
+    """Finaliza la configuración de un dispositivo"""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        
+        # Verificar que el dispositivo está en configuración
+        cursor.execute("""
+            SELECT i.* FROM inventario i
+            WHERE i.id = ? AND i.estado = 'EN PROCESO'
+        """, (inventario_id,))
+        
+        item = cursor.fetchone()
+        if not item:
+            raise ValueError("El dispositivo no está en proceso de configuración")
+        
+        # Actualizar configuración
+        cursor.execute("""
+            UPDATE dispositivo_configuraciones 
+            SET fecha_config_final = ?,
+                configuracion_realizada = ?
+            WHERE inventario_id = ?
+        """, (format_fecha(fecha_config_final) if fecha_config_final else None, 
+              config_realizada, inventario_id))
+        
+        # Cambiar estado a configurado
+        cursor.execute("""
+            UPDATE inventario SET estado = 'CONFIGURADO' WHERE id = ?
+        """, (inventario_id,))
+        
+        conn.commit()
+        return True
 
 def configurar_sd(inventario_id: int, config_final=None):
     """Marca una SD como configurada"""
@@ -264,18 +342,22 @@ def configurar_sd(inventario_id: int, config_final=None):
         return True
 
 # ========== FUNCIONES PARA EDITAR/ELIMinar EN INVENTARIO ==========
-def actualizar_item_inventario(item_id, estado=None, observaciones=None):
+def actualizar_item_inventario(item_id, estado=None):
     """Actualiza los campos editables de un item del inventario"""
+    # Verificar si el item está enviado
     with get_connection() as conn:
         cursor = conn.cursor()
+        cursor.execute("SELECT estado FROM inventario WHERE id = ?", (item_id,))
+        item = cursor.fetchone()
+        
+        if item and item['estado'] == 'ENVIADO':
+            raise ValueError("No se puede modificar un item que ya ha sido enviado")
+        
         updates = []
         params = []
         if estado is not None:
             updates.append("estado = ?")
             params.append(estado)
-        if observaciones is not None:
-            updates.append("observaciones = ?")
-            params.append(observaciones)
         if not updates:
             return False
         params.append(item_id)
@@ -316,10 +398,17 @@ def procesar_envio(items: list, folio: str, destino: str = "", descripcion: str 
             producto_id = req['producto_id']
             cantidad_necesaria = req['cantidad']
             
+            # Obtener items disponibles/configurados
             cursor.execute("""
-                SELECT id FROM inventario
-                WHERE producto_id = ? AND estado IN ('DISPONIBLE', 'CONFIGURADO')
-                ORDER BY fecha_ingreso ASC
+                SELECT i.id, p.tipo,
+                       dc.fecha_config_final as disp_fecha_final,
+                       sc.config_final as sd_fecha_final
+                FROM inventario i
+                JOIN productos p ON i.producto_id = p.id
+                LEFT JOIN dispositivo_configuraciones dc ON i.id = dc.inventario_id
+                LEFT JOIN sd_configuraciones sc ON i.id = sc.inventario_id
+                WHERE i.producto_id = ? AND i.estado IN ('DISPONIBLE', 'CONFIGURADO')
+                ORDER BY i.fecha_ingreso ASC
                 LIMIT ?
             """, (producto_id, cantidad_necesaria))
             
@@ -333,7 +422,20 @@ def procesar_envio(items: list, folio: str, destino: str = "", descripcion: str 
                     f"Requerido: {cantidad_necesaria}, Disponible: {len(disponibles)}"
                 )
             
+            # Validar que los dispositivos tengan fecha de configuración final
             for item in disponibles:
+                if item['tipo'] == 'DISPOSITIVO' and not item['disp_fecha_final']:
+                    raise ValueError(
+                        f"El dispositivo ID {item['id']} no tiene fecha de configuración final. "
+                        "Es obligatoria para poder enviarlo."
+                    )
+                
+                if item['tipo'] == 'SD' and not item['sd_fecha_final']:
+                    raise ValueError(
+                        f"La SD ID {item['id']} no tiene fecha de configuración final. "
+                        "Es obligatoria para poder enviarla."
+                    )
+                
                 inventario_ids.append(item['id'])
         
         cursor.execute("""
@@ -385,11 +487,13 @@ def get_detalle_envio(envio_id: int):
         cursor.execute("""
             SELECT ed.*, i.estado,
                    p.nombre as producto_nombre, p.ref_prod, p.tipo,
-                   sc.config_final
+                   sc.config_final as sd_config_final,
+                   dc.fecha_config_final as disp_config_final
             FROM envio_detalle ed
             JOIN inventario i ON ed.inventario_id = i.id
             JOIN productos p ON i.producto_id = p.id
             LEFT JOIN sd_configuraciones sc ON i.id = sc.inventario_id
+            LEFT JOIN dispositivo_configuraciones dc ON i.id = dc.inventario_id
             WHERE ed.envio_id = ?
         """, (envio_id,))
         return [dict(row) for row in cursor.fetchall()]
@@ -414,7 +518,7 @@ def get_metricas():
         metricas['cables_usb_disponibles'] = stock_por_tipo.get('CABLE_USB', 0)
         metricas['cables_eth_disponibles'] = stock_por_tipo.get('CABLE_ETHERNET', 0)
         
-        cursor.execute("SELECT COUNT(*) FROM inventario WHERE estado IN ('DISPONIBLE', 'CONFIGURADO')")
+        cursor.execute("SELECT COUNT(*) FROM inventario WHERE estado IN ('DISPONIBLE', 'EN PROCESO', 'CONFIGURADO')")
         metricas['total_en_inventario'] = cursor.fetchone()[0]
         
         cursor.execute("SELECT COUNT(*) FROM envios")
@@ -422,5 +526,11 @@ def get_metricas():
         
         cursor.execute("SELECT COUNT(*) FROM sd_configuraciones")
         metricas['sds_configuradas'] = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM dispositivo_configuraciones WHERE fecha_config_final IS NOT NULL")
+        metricas['dispositivos_configurados'] = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM dispositivo_configuraciones WHERE fecha_config_final IS NULL")
+        metricas['dispositivos_en_configuracion'] = cursor.fetchone()[0]
         
         return metricas
