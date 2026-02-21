@@ -140,7 +140,7 @@ def generar_ref(tipo: str) -> str:
     return f"{prefijo}-{nuevo_num:03d}"
 
 # ========== GESTIÓN DE PRODUCTOS ==========
-def crear_producto(tipo: str, nombre: Optional[str] = None, descripcion: str = "", ref: Optional[str] = None):
+def crear_producto(tipo: str, nombre: Optional[str] = None, ref: Optional[str] = None):
     if ref is None:
         ref = generar_ref(tipo)
     if nombre is None:
@@ -150,9 +150,9 @@ def crear_producto(tipo: str, nombre: Optional[str] = None, descripcion: str = "
         cursor = conn.cursor()
         try:
             cursor.execute("""
-                INSERT INTO productos (ref_prod, tipo, nombre, descripcion)
-                VALUES (?, ?, ?, ?)
-            """, (ref, tipo, nombre, descripcion))
+                INSERT INTO productos (ref_prod, tipo, nombre)
+                VALUES (?, ?, ?)
+            """, (ref, tipo, nombre))
             conn.commit()
             return cursor.lastrowid
         except sqlite3.IntegrityError:
@@ -166,7 +166,7 @@ def get_productos():
         return [dict(row) for row in cursor.fetchall()]
 
 # ========== GESTIÓN DE INVENTARIO ==========
-def agregar_producto_a_inventario(producto_id: int, cantidad: int, fecha_ingreso=None):
+def agregar_item_a_inventario(producto_id: int, cantidad: int, fecha_ingreso=None):
     """Agrega múltiples unidades de un producto al inventario"""
     if not fecha_ingreso:
         fecha_ingreso = datetime.now().date()
@@ -190,7 +190,6 @@ def obtener_stock_disponible(producto_id: Optional[int] = None, tipo: Optional[s
         
         query = """
             SELECT i.*, p.nombre as producto_nombre, p.ref_prod, p.tipo,
-                   sc.config_final, sc.fecha_configuracion as sd_fecha_config,
                    dc.fecha_config_inicio, dc.fecha_config_final as disp_fecha_config_final
             FROM inventario i
             JOIN productos p ON i.producto_id = p.id
@@ -226,7 +225,6 @@ def obtener_todo_el_inventario():
                 p.tipo,
 
                 sc.config_final as sd_config_final,
-                sc.fecha_configuracion as sd_fecha_config,
 
                 dc.fecha_config_inicio as disp_fecha_config_inicio,
                 dc.fecha_config_final as disp_fecha_config_final
@@ -515,13 +513,19 @@ def get_metricas():
         metricas['cables_usb_disponibles'] = stock_por_tipo.get('CABLE_USB', 0)
         metricas['cables_eth_disponibles'] = stock_por_tipo.get('CABLE_ETHERNET', 0)
         
-        cursor.execute("SELECT COUNT(*) FROM inventario WHERE estado IN ('DISPONIBLE', 'REINICIADO', 'CONFIGURADO')")
+        cursor.execute("SELECT COUNT(*) FROM inventario WHERE estado IN ('DISPONIBLE', 'REINICIADO', 'CONFIGURADO', 'DEFECTUOSO')")
         metricas['total_en_inventario'] = cursor.fetchone()[0]
         
         cursor.execute("SELECT COUNT(*) FROM envios")
         metricas['total_envios'] = cursor.fetchone()[0]
         
-        cursor.execute("SELECT COUNT(*) FROM sd_configuraciones")
+        cursor.execute("""
+            SELECT COUNT(*)
+            FROM inventario i
+            JOIN productos p ON i.producto_id = p.id
+            WHERE p.tipo = 'SD'
+            AND i.estado = 'CONFIGURADO'
+        """)
         metricas['sds_configuradas'] = cursor.fetchone()[0]
         
         cursor.execute("SELECT COUNT(*) FROM dispositivo_configuraciones WHERE fecha_config_final IS NOT NULL")
@@ -529,5 +533,8 @@ def get_metricas():
         
         cursor.execute("SELECT COUNT(*) FROM dispositivo_configuraciones WHERE fecha_config_final IS NULL")
         metricas['dispositivos_reiniciados'] = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM inventario WHERE estado = 'DEFECTUOSO'")
+        metricas['dispositivos_defectuosos'] = cursor.fetchone()[0]
         
         return metricas
