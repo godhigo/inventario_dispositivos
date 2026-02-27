@@ -365,12 +365,11 @@ with tab3:
         
         st.dataframe(df_envios, use_container_width=True, hide_index=True, column_config={
             "id": "ID", 
-            "folio": "Folio", 
-            "fecha_salida": "Fecha Salida", 
-            "destino": "Destino",
-            "descripcion": "Descripción", 
-            "total_items": "Items", 
-            "created_at": "Registrado"
+            "folio": "FOLIO", 
+            "fecha_salida": "FECHA SALIDA", 
+            "destino": "DESTINO", 
+            "total_items": "TOTAL ITEMS", 
+            "created_at": "FECHA DE REGISTRO"
         })
         
         st.markdown("---")
@@ -379,7 +378,7 @@ with tab3:
         selected_envio = st.selectbox(
             "Seleccionar envio:",
             options=df_envios['id'].tolist(),
-            format_func=lambda x: f"Folio: {df_envios[df_envios['id']==x]['folio'].iloc[0]} - {df_envios[df_envios['id']==x]['fecha_salida'].iloc[0]}"
+            format_func=lambda x: f"Folio: {df_envios[df_envios['id']==x]['folio'].iloc[0]}"
         )
         
         if selected_envio:
@@ -388,12 +387,20 @@ with tab3:
                 st.markdown("##### Items enviados:")
                 df_detalle = pd.DataFrame(detalle)
                 st.dataframe(df_detalle, use_container_width=True, hide_index=True, column_config={
-                    "producto_nombre": "Producto", 
+                    "id": "ID",
+                    "folio": "FOLIO",
+                    "fecha_salida": "FECHA SALIDA",
+                    "total_items": "TOTAL ITEMS",
+                    "created_at": "FECHA DE REGISTRO",
+                    "producto_nombre": "ITEM", 
                     "ref_prod": "REF", 
-                    "tipo": "Tipo",
-                    "sd_config_final": "Config SD",
-                    "disp_config_final": "Config Dispositivo",
-                    "estado": "Estado"
+                    "tipo": "TIPO",
+                    "sd_config_final": "SD FECH DE CONFIGURACIÓN",
+                    "disp_config_final": "DISP FECHA CONFIGURACIÓN",
+                    "disp_config_inicio": "DISP FECHA REINICIO",
+                    "estado": "ESTADO",
+                    "destino": "DESTINO",
+                    "descripcion": "DESCRIPCIÓN"
                 })
     else:
         st.info("No hay envios registrados")

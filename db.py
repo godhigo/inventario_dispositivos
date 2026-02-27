@@ -190,13 +190,25 @@ def obtener_stock_disponible(producto_id: Optional[int] = None, tipo: Optional[s
         
         query = """
             SELECT i.*, p.nombre as producto_nombre, p.ref_prod, p.tipo,
-                   dc.fecha_config_inicio, dc.fecha_config_final as disp_fecha_config_final
+                dc.fecha_config_inicio, dc.fecha_config_final as disp_fecha_config_final
             FROM inventario i
             JOIN productos p ON i.producto_id = p.id
             LEFT JOIN sd_configuraciones sc ON i.id = sc.inventario_id
             LEFT JOIN dispositivo_configuraciones dc ON i.id = dc.inventario_id
-            WHERE i.estado = 'DISPONIBLE'
+            WHERE 
+            (
+                (
+                    p.tipo = 'DISPOSITIVO'
+                    AND i.estado IN ('CONFIGURADO', 'REINICIADO')
+                )
+                OR
+                (
+                    p.tipo != 'DISPOSITIVO'
+                    AND i.estado = 'DISPONIBLE'
+                )
+            )
         """
+        
         params = []
         
         if producto_id:
