@@ -7,6 +7,9 @@ import time
 # Constantes
 TIPOS_CABLE = ["CABLE_USB", "CABLE_ETHERNET", "CABLE_C"]
 TIPOS_ITEM = ["DISPOSITIVO", "SD"] + TIPOS_CABLE
+MAX_FOLIO_LENGTH = 20
+MAX_DESTINO_LENGTH = 80
+MAX_DESCRIPCION_LENGTH = 250
 
 st.set_page_config(
     page_title="Sistema de Inventario - Nubix",
@@ -22,6 +25,10 @@ if 'carrito' not in st.session_state:
     st.session_state.carrito = []
 if 'error_envio' not in st.session_state:
     st.session_state.error_envio = None
+if 'modo_edicion' not in st.session_state:
+    st.session_state.modo_edicion = False
+if 'item_editando' not in st.session_state:
+    st.session_state.item_editando = None
 
 st.markdown("""
 <style>
@@ -39,6 +46,7 @@ st.markdown("""
     .cart-item { padding: 0.5rem; border-bottom: 1px solid #444; }
     .stock-ajustado { font-size: 0.8rem; color: #888; }
     .disabled-input { opacity: 0.5; pointer-events: none; }
+    .edit-mode-active { border-left: 4px solid #ff4b4b; padding-left: 1rem; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -90,6 +98,12 @@ def get_stock_ajustado(producto_id: int) -> int:
     en_carrito = sum(item['cantidad'] for item in st.session_state.carrito if item['producto_id'] == producto_id)
     return max(0, stock_total - en_carrito)
 
+# ========== FUNCIÓN PARA SALIR DEL MODO EDICIÓN ==========
+def salir_modo_edicion():
+    """Limpia el estado de edición"""
+    st.session_state.modo_edicion = False
+    st.session_state.item_editando = None
+
 # ========== TAB 1: INVENTARIO ==========
 with tab1:
     st.subheader("Inventario Físico")
@@ -134,6 +148,7 @@ with tab1:
                 "id": "ID",
                 "estado": "ESTADO",
                 "fecha_ingreso": "Fecha Ingreso",
+                "fecha_defectuoso": "Fecha Defectuoso",
                 "producto_nombre": "ITEM",   
                 "ref_prod": "REF", 
                 "tipo": "TIPO",
@@ -148,43 +163,24 @@ with tab1:
                 if not inventario:
                     st.info("No hay items en el inventario")
                 else:
-                    # Obtener items filtrados actuales
                     items_filtrados = df_inv['id'].tolist() if not df_inv.empty else []
                     
                     if items_filtrados:
-                        col_select, col_action = st.columns([3, 1])
-                        
-                        with col_select:
-                            selected_id = st.selectbox(
-                                "Seleccionar item a editar:", 
-                                options=items_filtrados,
-                                format_func=lambda x: f"ID {x} - {df_inv[df_inv['id']==x]['ref_prod'].iloc[0]} - {df_inv[df_inv['id']==x]['producto_nombre'].iloc[0]}"
-                            )
-                        
-                        with col_action:
-                            st.markdown("<br>", unsafe_allow_html=True)
-                            if st.button("Cargar datos", use_container_width=True):
-                                st.session_state['item_editando'] = selected_id
-                                st.rerun()
-                        
-                        # Si hay un item seleccionado para editar
-                        if 'item_editando' in st.session_state and st.session_state['item_editando'] == selected_id:
+                        # Si estamos en modo edición, mostrar formulario
+                        if st.session_state.modo_edicion and st.session_state.item_editando in items_filtrados:
+                            selected_id = st.session_state.item_editando
                             item_data = df_inv[df_inv['id'] == selected_id].iloc[0].to_dict()
-                            
-                            # Obtener datos completos del item (incluyendo configuraciones)
                             item_completo = obtener_item_completo(selected_id)
+                            
+                            st.markdown(f"### Editando: {item_data['ref_prod']} - {item_data['producto_nombre']}")
+                            st.caption(f"Tipo: {item_data['tipo']} | Estado actual: **{item_data['estado']}**")
                             
                             if item_data['estado'] == 'ENVIADO':
                                 st.warning("⚠️ Este item ya fue enviado y no puede ser modificado")
-                                
-                                if st.button("Cancelar edición"):
-                                    del st.session_state['item_editando']
+                                if st.button("Volver", key="volver_enviado"):
+                                    salir_modo_edicion()
                                     st.rerun()
-                            
                             else:
-                                st.markdown(f"### Editando: {item_data['ref_prod']} - {item_data['producto_nombre']}")
-                                st.caption(f"Tipo: {item_data['tipo']} | Estado actual: **{item_data['estado']}**")
-                                
                                 with st.form("form_editar_item"):
                                     st.markdown("#### Datos del Inventario")
                                     
@@ -200,7 +196,6 @@ with tab1:
                                         )
                                     
                                     with col2:
-                                        # Convertir fecha_ingreso si es string
                                         fecha_ingreso_val = item_data['fecha_ingreso']
                                         if isinstance(fecha_ingreso_val, str):
                                             fecha_ingreso_val = datetime.strptime(fecha_ingreso_val, "%Y-%m-%d").date()
@@ -225,6 +220,7 @@ with tab1:
                                         sd_config_final = st.date_input(
                                             "Fecha de configuración final",
                                             value=sd_fecha_val if sd_fecha_val else None,
+                                            max_value=datetime.now().date(),
                                             help="Fecha en que se quemó la imagen en la SD"
                                         )
                                     else:
@@ -243,6 +239,7 @@ with tab1:
                                             disp_fecha_inicio = st.date_input(
                                                 "Fecha de inicio (reinicio)",
                                                 value=fecha_inicio_val if fecha_inicio_val else None,
+                                                max_value=datetime.now().date(),
                                                 help="Fecha en que se reinició el dispositivo"
                                             )
                                         
@@ -254,6 +251,7 @@ with tab1:
                                             disp_fecha_fin = st.date_input(
                                                 "Fecha de finalización",
                                                 value=fecha_fin_val if fecha_fin_val else None,
+                                                max_value=datetime.now().date(),
                                                 help="Fecha en que se completó la configuración"
                                             )
                                         
@@ -268,28 +266,26 @@ with tab1:
                                     st.markdown("---")
                                     
                                     # Botones de acción
-                                    col_b1, col_b2, col_b3 = st.columns(3)
+                                    col_b1, col_b2, col_b3 = st.columns([2, 2, 2])
                                     
                                     with col_b1:
-                                        guardar = st.form_submit_button("✅ Guardar cambios", use_container_width=True, type="primary")
+                                        guardar = st.form_submit_button("Guardar cambios", use_container_width=True, type="primary")
                                     
                                     with col_b2:
-                                        # Botón para marcar como defectuoso (acción rápida)
-                                        marcar_defectuoso = st.form_submit_button("⚠️ Marcar como Defectuoso", use_container_width=True)
+                                        marcar_defectuoso = st.form_submit_button("Marcar como Defectuoso", use_container_width=True)
                                     
                                     with col_b3:
-                                        cancelar = st.form_submit_button("❌ Cancelar", use_container_width=True)
+                                        cancelar = st.form_submit_button("Cancelar", use_container_width=True)
                                 
                                 # Procesar acciones del formulario
                                 if guardar:
                                     try:
-                                        # Validar fechas de dispositivo
                                         if item_data['tipo'] == 'DISPOSITIVO' and disp_fecha_inicio and disp_fecha_fin:
                                             if disp_fecha_inicio > disp_fecha_fin:
                                                 st.error("❌ La fecha de inicio no puede ser posterior a la fecha final")
                                                 st.stop()
                                         
-                                        actualizar_item_completo(
+                                        actualizar_item(
                                             item_id=selected_id,
                                             estado=nuevo_estado,
                                             fecha_ingreso=nueva_fecha_ingreso,
@@ -299,7 +295,7 @@ with tab1:
                                         )
                                         
                                         st.success("✅ Item actualizado correctamente")
-                                        del st.session_state['item_editando']
+                                        salir_modo_edicion()
                                         st.cache_data.clear()
                                         time.sleep(1)
                                         st.rerun()
@@ -313,7 +309,7 @@ with tab1:
                                     try:
                                         marcar_como_defectuoso(selected_id)
                                         st.success("✅ Item marcado como defectuoso")
-                                        del st.session_state['item_editando']
+                                        salir_modo_edicion()
                                         st.cache_data.clear()
                                         time.sleep(1)
                                         st.rerun()
@@ -323,63 +319,81 @@ with tab1:
                                         st.error(f"❌ Error inesperado: {str(e)}")
                                 
                                 if cancelar:
-                                    del st.session_state['item_editando']
+                                    salir_modo_edicion()
                                     st.rerun()
                         
-                        # Sección de eliminación (separada para evitar confusiones)
-                        st.markdown("---")
-                        st.markdown("#### Eliminar Item")
-                        st.warning("⚠️ Esta acción no se puede deshacer")
-                        
-                        col_del1, col_del2, col_del3 = st.columns([2, 1, 2])
-                        
-                        with col_del1:
-                            item_a_eliminar = st.selectbox(
-                                "Seleccionar item a eliminar:",
-                                options=items_filtrados,
-                                format_func=lambda x: f"ID {x} - {df_inv[df_inv['id']==x]['ref_prod'].iloc[0]}",
-                                key="select_eliminar"
-                            )
-                        
-                        with col_del2:
-                            st.markdown("<br>", unsafe_allow_html=True)
-                            if st.button("Eliminar", key="btn_eliminar", type="secondary"):
-                                st.session_state['confirmar_eliminacion'] = item_a_eliminar
-                                st.rerun()
-                        
-                        # Confirmación de eliminación
-                        if 'confirmar_eliminacion' in st.session_state:
-                            item_id_confirm = st.session_state['confirmar_eliminacion']
-                            item_info = df_inv[df_inv['id'] == item_id_confirm].iloc[0]
+                        else:
+                            # Modo selección (no estamos editando)
+                            col_select, col_action = st.columns([3, 1])
                             
-                            st.error(f"### ¿Eliminar permanentemente?")
-                            st.warning(f"**Item:** {item_info['ref_prod']} - {item_info['producto_nombre']}")
-                            st.warning(f"**Estado:** {item_info['estado']}")
+                            with col_select:
+                                selected_id = st.selectbox(
+                                    "Seleccionar item a editar:", 
+                                    options=items_filtrados,
+                                    format_func=lambda x: f"ID {x} - {df_inv[df_inv['id']==x]['ref_prod'].iloc[0]} - {df_inv[df_inv['id']==x]['producto_nombre'].iloc[0]}"
+                                )
                             
-                            col_conf1, col_conf2, col_conf3 = st.columns([1, 1, 2])
-                            
-                            with col_conf1:
-                                if st.button("✅ Sí, eliminar", key="confirm_si", type="primary"):
-                                    try:
-                                        eliminar_item_inventario(item_id_confirm)
-                                        st.success("✅ Item eliminado permanentemente")
-                                        del st.session_state['confirmar_eliminacion']
-                                        st.cache_data.clear()
-                                        time.sleep(1)
-                                        st.rerun()
-                                    except ValueError as e:
-                                        st.error(f"❌ {str(e)}")
-                                        del st.session_state['confirmar_eliminacion']
-                                        time.sleep(2)
-                                        st.rerun()
-                                    except Exception as e:
-                                        st.error(f"❌ Error inesperado: {str(e)}")
-                                        del st.session_state['confirmar_eliminacion']
-                            
-                            with col_conf2:
-                                if st.button("❌ No, cancelar", key="confirm_no"):
-                                    del st.session_state['confirmar_eliminacion']
+                            with col_action:
+                                st.markdown("<br>", unsafe_allow_html=True)
+                                if st.button("Editar", use_container_width=True, key="btn_editar"):
+                                    st.session_state.modo_edicion = True
+                                    st.session_state.item_editando = selected_id
                                     st.rerun()
+                            
+                            # Sección de eliminación (separada)
+                            st.markdown("---")
+                            st.markdown("#### Eliminar Item")
+                            st.warning("⚠️ Esta acción no se puede deshacer")
+                            
+                            col_del1, col_del2, col_del3 = st.columns([2, 1, 2])
+                            
+                            with col_del1:
+                                item_a_eliminar = st.selectbox(
+                                    "Seleccionar item a eliminar:",
+                                    options=items_filtrados,
+                                    format_func=lambda x: f"ID {x} - {df_inv[df_inv['id']==x]['ref_prod'].iloc[0]}",
+                                    key="select_eliminar"
+                                )
+                            
+                            with col_del2:
+                                st.markdown("<br>", unsafe_allow_html=True)
+                                if st.button("Eliminar", key="btn_eliminar", type="secondary"):
+                                    st.session_state['confirmar_eliminacion'] = item_a_eliminar
+                                    st.rerun()
+                            
+                            # Confirmación de eliminación
+                            if 'confirmar_eliminacion' in st.session_state:
+                                item_id_confirm = st.session_state['confirmar_eliminacion']
+                                item_info = df_inv[df_inv['id'] == item_id_confirm].iloc[0]
+                                
+                                st.error(f"### ¿Eliminar permanentemente?")
+                                st.warning(f"**Item:** {item_info['ref_prod']} - {item_info['producto_nombre']}")
+                                st.warning(f"**Estado:** {item_info['estado']}")
+                                
+                                col_conf1, col_conf2, col_conf3 = st.columns([1, 1, 2])
+                                
+                                with col_conf1:
+                                    if st.button("✅ Sí, eliminar", key="confirm_si", type="primary"):
+                                        try:
+                                            eliminar_item_inventario(item_id_confirm)
+                                            st.success("✅ Item eliminado permanentemente")
+                                            del st.session_state['confirmar_eliminacion']
+                                            st.cache_data.clear()
+                                            time.sleep(1)
+                                            st.rerun()
+                                        except ValueError as e:
+                                            st.error(f"❌ {str(e)}")
+                                            del st.session_state['confirmar_eliminacion']
+                                            time.sleep(2)
+                                            st.rerun()
+                                        except Exception as e:
+                                            st.error(f"❌ Error inesperado: {str(e)}")
+                                            del st.session_state['confirmar_eliminacion']
+                                
+                                with col_conf2:
+                                    if st.button("❌ No, cancelar", key="confirm_no"):
+                                        del st.session_state['confirmar_eliminacion']
+                                        st.rerun()
                     else:
                         st.warning("No hay items en la vista filtrada para editar")
 
@@ -395,12 +409,12 @@ with tab2:
             with st.form("nuevo_item"):
                 nombre = None
                 if tipo == "DISPOSITIVO":
-                    nombre = st.text_input("Nombre del dispositivo:", placeholder="Ej: Dispositivo PRO")
+                    nombre = st.text_input("Nombre del dispositivo:", placeholder="Ej: Dispositivo PRO", max_chars=100)
                     st.info("La referencia se generará automáticamente.")
                 else:
                     st.info("La referencia y el nombre se generarán automáticamente.")
                 
-                submitted = st.form_submit_button("Crear item")
+                submitted = st.form_submit_button("Crear item", use_container_width=True, type="primary")
                 
                 if submitted:
                     if tipo == "DISPOSITIVO" and not nombre:
@@ -428,15 +442,17 @@ with tab2:
                             format_func=lambda x: f"{next(p['ref_prod'] for p in items if p['id']==x)} - {next(p['nombre'] for p in items if p['id']==x)}"
                         )
                     cantidad = st.number_input("Cantidad a ingresar:", min_value=1, max_value=100, value=1)
-                    fecha_ingreso = st.date_input("Fecha de ingreso:", value=datetime.now().date())
+                    fecha_ingreso = st.date_input("Fecha de ingreso:", value=datetime.now().date(), max_value=datetime.now().date())
                     
-                    if st.form_submit_button("Registrar en Inventario"):
+                    if st.form_submit_button("Registrar en Inventario", use_container_width=True, type="primary"):
                         try:
                             ids = agregar_item_a_inventario(item_seleccionado, cantidad, fecha_ingreso)
                             st.success(f"✅ {cantidad} unidad(es) agregada(s) al inventario")
                             st.cache_data.clear()
                             time.sleep(1)
                             st.rerun()
+                        except ValueError as e:
+                            st.error(f"❌ {str(e)}")
                         except Exception as e:
                             st.error(f"❌ Error: {str(e)}")
 
@@ -446,10 +462,11 @@ with tab6:
     
     # Mostrar error pendiente si existe
     if st.session_state.error_envio:
-        st.error(f"❌ Error en el envío anterior: {st.session_state.error_envio}")
-        if st.button("Limpiar error y reintentar"):
-            st.session_state.error_envio = None
-            st.rerun()
+        with st.container():
+            st.error(f"❌ Error en el envío anterior: {st.session_state.error_envio}")
+            if st.button("Limpiar error y reintentar", use_container_width=True):
+                st.session_state.error_envio = None
+                st.rerun()
     
     productos = get_productos()
     if not productos:
@@ -526,34 +543,25 @@ with tab6:
         
         col1, col2 = st.columns(2)
         with col1:
-            folio = st.text_input("Número de Folio:", placeholder="Ej: NBX XX0-X000")
+            folio = st.text_input("Número de Folio:", placeholder="Ej: NBX-2024-001", max_chars=MAX_FOLIO_LENGTH)
         with col2:
-            destino = st.text_input("Destino (opcional):", placeholder="Cliente o ubicación")
+            destino = st.text_input("Destino (opcional):", placeholder="Cliente o ubicación", max_chars=MAX_DESTINO_LENGTH)
         
-        descripcion = st.text_area("Descripción del envío (opcional):", placeholder="Notas adicionales...")
+        descripcion = st.text_area("Descripción del envío (opcional):", placeholder="Notas adicionales...", max_chars=MAX_DESCRIPCION_LENGTH)
         
         if st.button("Procesar Envío", use_container_width=True, type="primary"):
-            if not folio:
+            if not folio or not folio.strip():
                 st.error("❌ El número de folio es obligatorio.")
             elif not st.session_state.carrito:
                 st.error("❌ El carrito está vacío")
             else:
                 try:
                     with st.spinner("Procesando envío..."):
-                        # Verificación final de stock
-                        for item in st.session_state.carrito:
-                            stock_actual = len(obtener_items_para_envio(producto_id=item['producto_id']))
-                            if stock_actual < item['cantidad']:
-                                raise ValueError(
-                                    f"Stock insuficiente para {item['nombre']}. "
-                                    f"Disponible: {stock_actual}, Solicitado: {item['cantidad']}"
-                                )
-                        
                         items_envio = [
                             {'producto_id': item['producto_id'], 'cantidad': item['cantidad']} 
                             for item in st.session_state.carrito
                         ]
-                        resultado = procesar_envio(items_envio, folio, destino, descripcion)
+                        resultado = procesar_envio(items_envio, folio.strip(), destino, descripcion)
                     
                     st.success(f"""
                     **✅ Envío procesado exitosamente**
@@ -571,7 +579,6 @@ with tab6:
                 except ValueError as e:
                     st.session_state.error_envio = str(e)
                     st.error(f"❌ Error: {str(e)}")
-                    # No limpiamos el carrito para que el usuario pueda reintentar
                 except Exception as e:
                     st.session_state.error_envio = f"Error inesperado: {str(e)}"
                     st.error(f"❌ Error inesperado: {str(e)}")
@@ -642,7 +649,7 @@ with tab4:
                     format_func=lambda x: f"ID {x} - {next(s['producto_nombre'] for s in sds_disponibles if s['id']==x)}"
                 )
             with col2:
-                config_final = st.date_input("Fecha de configuración final:", value=datetime.now().date())
+                config_final = st.date_input("Fecha de configuración final:", value=datetime.now().date(), max_value=datetime.now().date())
             
             if st.button("Configurar SD", use_container_width=True, type="primary"):
                 if not config_final:
@@ -708,7 +715,7 @@ with tab5:
                             key="inicio_config"
                         )
                     with col_right:
-                        fecha_reinicio = st.date_input("Fecha de reinicio:", value=datetime.now().date(), key="fecha_reinicio")
+                        fecha_reinicio = st.date_input("Fecha de reinicio:", value=datetime.now().date(), max_value=datetime.now().date(), key="fecha_reinicio")
                     
                     if st.button("Reiniciar Dispositivo", use_container_width=True, type="primary"):
                         try:
@@ -747,7 +754,7 @@ with tab5:
                             key="fin_config"
                         )
                     with col_right:
-                        fecha_fin = st.date_input("Fecha de configuración:", value=datetime.now().date(), key="fecha_fin")
+                        fecha_fin = st.date_input("Fecha de configuración:", value=datetime.now().date(), max_value=datetime.now().date(), key="fecha_fin")
                     
                     if st.button("Finalizar Configuración", use_container_width=True, type="primary"):
                         if not fecha_fin:
@@ -775,6 +782,8 @@ with tab5:
             if not dv_reiniciado.empty:
                 st.dataframe(dv_reiniciado[['id', 'ref_prod', 'producto_nombre', 'disp_fecha_config_inicio']], 
                             use_container_width=True, hide_index=True)
+        
+        st.markdown("---")
         
         # Tabla de dispositivos configurados
         if configurados:

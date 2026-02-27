@@ -1,7 +1,7 @@
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, date
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 
 DB_NAME = "inventario.db"
 
@@ -54,6 +54,7 @@ def init_db():
                 estado TEXT NOT NULL DEFAULT 'DISPONIBLE' 
                     CHECK(estado IN ('DISPONIBLE', 'REINICIADO', 'CONFIGURADO', 'ENVIADO', 'DEFECTUOSO')),
                 fecha_ingreso DATE NOT NULL,
+                fecha_defectuoso TIMESTAMP,  -- Nuevo campo para trazabilidad
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (producto_id) REFERENCES productos(id) ON DELETE RESTRICT
             )
@@ -126,11 +127,41 @@ def init_db():
         # No hacer commit explícito, el context manager lo hace
 
 # ========== FUNCIONES HELPER ==========
-def format_fecha(fecha) -> Optional[str]:
-    """Convierte fecha a string para BD"""
-    if fecha:
+def format_fecha(fecha: Union[date, str, None]) -> Optional[str]:
+    """Convierte fecha a string para BD de manera segura"""
+    if fecha is None:
+        return None
+    if isinstance(fecha, str):
+        # Si ya es string, validar formato
+        try:
+            datetime.strptime(fecha, "%Y-%m-%d")
+            return fecha
+        except ValueError:
+            raise ValueError(f"Formato de fecha inválido: {fecha}")
+    if isinstance(fecha, date):
         return fecha.strftime("%Y-%m-%d")
-    return None
+    raise ValueError(f"Tipo de fecha no soportado: {type(fecha)}")
+
+def parse_fecha(fecha_str: Optional[str]) -> Optional[date]:
+    """Convierte string de BD a objeto date"""
+    if fecha_str is None:
+        return None
+    if isinstance(fecha_str, date):
+        return fecha_str
+    try:
+        return datetime.strptime(fecha_str, "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return None
+
+def validar_fecha_no_futura(fecha: date, nombre_campo: str = "Fecha"):
+    """Valida que una fecha no sea futura"""
+    if fecha > datetime.now().date():
+        raise ValueError(f"{nombre_campo} no puede ser futura")
+
+def validar_fechas_ordenadas(fecha_inicio: Optional[date], fecha_fin: Optional[date]):
+    """Valida que fecha_inicio <= fecha_fin si ambas existen"""
+    if fecha_inicio and fecha_fin and fecha_inicio > fecha_fin:
+        raise ValueError("La fecha de inicio no puede ser posterior a la fecha final")
 
 def generar_ref(tipo: str) -> str:
     """
@@ -156,7 +187,6 @@ def generar_ref(tipo: str) -> str:
         """, (tipo,))
         
         # Incrementar el contador y obtener el nuevo valor
-        # SQLite no soporta RETURNING en UPDATE, así que lo hacemos en dos pasos
         cursor.execute("""
             UPDATE secuencias 
             SET ultimo_numero = ultimo_numero + 1 
@@ -221,7 +251,6 @@ def obtener_sds_para_configurar() -> List[Dict[str, Any]]:
     with get_connection(read_only=True) as conn:
         cursor = conn.cursor()
         
-        # SDs disponibles que NO tienen entrada en sd_configuraciones
         cursor.execute("""
             SELECT i.*, p.nombre as producto_nombre, p.ref_prod
             FROM inventario i
@@ -229,7 +258,7 @@ def obtener_sds_para_configurar() -> List[Dict[str, Any]]:
             LEFT JOIN sd_configuraciones sc ON i.id = sc.inventario_id
             WHERE p.tipo = 'SD' 
               AND i.estado = 'DISPONIBLE'
-              AND sc.id IS NULL  -- No tiene configuración previa
+              AND sc.id IS NULL
             ORDER BY i.fecha_ingreso ASC
         """)
         
@@ -249,7 +278,7 @@ def obtener_dispositivos_para_reiniciar() -> List[Dict[str, Any]]:
             LEFT JOIN dispositivo_configuraciones dc ON i.id = dc.inventario_id
             WHERE p.tipo = 'DISPOSITIVO' 
               AND i.estado = 'DISPONIBLE'
-              AND dc.id IS NULL  -- No tiene configuración iniciada
+              AND dc.id IS NULL
             ORDER BY i.fecha_ingreso ASC
         """)
         
@@ -269,30 +298,17 @@ def obtener_dispositivos_reiniciados() -> List[Dict[str, Any]]:
             JOIN dispositivo_configuraciones dc ON i.id = dc.inventario_id
             WHERE p.tipo = 'DISPOSITIVO' 
               AND i.estado = 'REINICIADO'
-              AND dc.fecha_config_final IS NULL  -- Aún no finalizado
+              AND dc.fecha_config_final IS NULL
             ORDER BY dc.fecha_config_inicio DESC
-        """)
-        return [dict(row) for row in cursor.fetchall()]
-
-def obtener_cables_disponibles() -> List[Dict[str, Any]]:
-    """
-    Obtiene cables disponibles para envío.
-    """
-    with get_connection(read_only=True) as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT i.*, p.nombre as producto_nombre, p.ref_prod, p.tipo
-            FROM inventario i
-            JOIN productos p ON i.producto_id = p.id
-            WHERE p.tipo IN ('CABLE_USB', 'CABLE_ETHERNET', 'CABLE_C')
-              AND i.estado = 'DISPONIBLE'
-            ORDER BY i.fecha_ingreso ASC
         """)
         return [dict(row) for row in cursor.fetchall()]
 
 # ========== GESTIÓN DE PRODUCTOS ==========
 def crear_producto(tipo: str, nombre: Optional[str] = None, ref: Optional[str] = None) -> int:
     """Crea un nuevo producto en el catálogo"""
+    if tipo not in ['DISPOSITIVO', 'SD', 'CABLE_USB', 'CABLE_ETHERNET', 'CABLE_C']:
+        raise ValueError(f"Tipo de producto inválido: {tipo}")
+    
     if ref is None:
         ref = generar_ref(tipo)
     if nombre is None:
@@ -306,8 +322,10 @@ def crear_producto(tipo: str, nombre: Optional[str] = None, ref: Optional[str] =
                 VALUES (?, ?, ?)
             """, (ref, tipo, nombre))
             return cursor.lastrowid
-        except sqlite3.IntegrityError:
-            raise ValueError(f"Ya existe un producto con REF '{ref}'")
+        except sqlite3.IntegrityError as e:
+            if "UNIQUE constraint failed" in str(e):
+                raise ValueError(f"Ya existe un producto con REF '{ref}'")
+            raise ValueError(f"Error de integridad en BD: {str(e)}")
 
 def get_productos() -> List[Dict[str, Any]]:
     """Obtiene todos los productos del catálogo"""
@@ -316,11 +334,27 @@ def get_productos() -> List[Dict[str, Any]]:
         cursor.execute("SELECT * FROM productos ORDER BY tipo, nombre")
         return [dict(row) for row in cursor.fetchall()]
 
+def verificar_producto_existe(producto_id: int) -> bool:
+    """Verifica si un producto existe en el catálogo"""
+    with get_connection(read_only=True) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM productos WHERE id = ?", (producto_id,))
+        return cursor.fetchone() is not None
+
 # ========== GESTIÓN DE INVENTARIO ==========
 def agregar_item_a_inventario(producto_id: int, cantidad: int, fecha_ingreso=None) -> List[int]:
     """Agrega múltiples unidades de un producto al inventario"""
-    if not fecha_ingreso:
+    # Validaciones
+    if cantidad <= 0:
+        raise ValueError("La cantidad debe ser positiva")
+    
+    if not verificar_producto_existe(producto_id):
+        raise ValueError(f"El producto con ID {producto_id} no existe")
+    
+    if fecha_ingreso is None:
         fecha_ingreso = datetime.now().date()
+    else:
+        validar_fecha_no_futura(fecha_ingreso, "Fecha de ingreso")
     
     ids_generados = []
     with get_connection(read_only=False) as conn:
@@ -344,6 +378,7 @@ def obtener_todo_el_inventario() -> List[Dict[str, Any]]:
                 i.id,
                 i.estado,
                 i.fecha_ingreso,
+                i.fecha_defectuoso,
 
                 p.nombre AS producto_nombre,
                 p.ref_prod,
@@ -380,6 +415,7 @@ def obtener_item_completo(item_id: int) -> Optional[Dict[str, Any]]:
                 i.producto_id,
                 i.estado,
                 i.fecha_ingreso,
+                i.fecha_defectuoso,
                 i.created_at,
 
                 p.nombre AS producto_nombre,
@@ -404,7 +440,7 @@ def obtener_item_completo(item_id: int) -> Optional[Dict[str, Any]]:
         row = cursor.fetchone()
         return dict(row) if row else None
 
-def actualizar_item_completo(
+def actualizar_item(
     item_id: int,
     estado: Optional[str] = None,
     fecha_ingreso: Optional[date] = None,
@@ -413,7 +449,7 @@ def actualizar_item_completo(
     disp_fecha_config_final: Optional[date] = None
 ) -> bool:
     """
-    Actualiza un item del inventario y sus configuraciones asociadas.
+    Única función para actualizar un item del inventario y sus configuraciones.
     Solo items no enviados pueden ser editados.
     """
     with get_connection(read_only=False) as conn:
@@ -424,7 +460,7 @@ def actualizar_item_completo(
         item = cursor.fetchone()
         
         if not item:
-            raise ValueError("El item no existe")
+            raise ValueError(f"El item con ID {item_id} no existe")
         
         if item['estado'] == 'ENVIADO':
             raise ValueError("No se puede modificar un item que ya ha sido enviado")
@@ -432,7 +468,34 @@ def actualizar_item_completo(
         # Obtener tipo de producto
         cursor.execute("SELECT tipo FROM productos WHERE id = ?", (item['producto_id'],))
         producto = cursor.fetchone()
-        tipo = producto['tipo'] if producto else None
+        if not producto:
+            raise ValueError(f"El producto asociado al item no existe")
+        tipo = producto['tipo']
+        
+        # Validar fechas
+        if fecha_ingreso:
+            validar_fecha_no_futura(fecha_ingreso, "Fecha de ingreso")
+        
+        # Validar fechas de dispositivo si aplica
+        if tipo == 'DISPOSITIVO':
+            # Obtener fechas actuales si no se proporcionan
+            cursor.execute("""
+                SELECT fecha_config_inicio, fecha_config_final 
+                FROM dispositivo_configuraciones 
+                WHERE inventario_id = ?
+            """, (item_id,))
+            config_actual = cursor.fetchone()
+            
+            fecha_inicio = disp_fecha_config_inicio
+            fecha_fin = disp_fecha_config_final
+            
+            if config_actual:
+                if fecha_inicio is None:
+                    fecha_inicio = parse_fecha(config_actual['fecha_config_inicio'])
+                if fecha_fin is None:
+                    fecha_fin = parse_fecha(config_actual['fecha_config_final'])
+            
+            validar_fechas_ordenadas(fecha_inicio, fecha_fin)
         
         # Actualizar inventario
         updates = []
@@ -443,9 +506,6 @@ def actualizar_item_completo(
             params.append(estado)
         
         if fecha_ingreso is not None:
-            # Validar que la fecha no sea futura
-            if fecha_ingreso > datetime.now().date():
-                raise ValueError("La fecha de ingreso no puede ser futura")
             updates.append("fecha_ingreso = ?")
             params.append(format_fecha(fecha_ingreso))
         
@@ -455,7 +515,6 @@ def actualizar_item_completo(
         
         # Actualizar configuración de SD si aplica
         if tipo == 'SD' and sd_config_final is not None:
-            # Verificar si existe configuración
             cursor.execute("SELECT id FROM sd_configuraciones WHERE inventario_id = ?", (item_id,))
             config = cursor.fetchone()
             
@@ -466,81 +525,49 @@ def actualizar_item_completo(
                     WHERE inventario_id = ?
                 """, (format_fecha(sd_config_final), item_id))
             else:
-                # Si no existe pero se quiere poner fecha, crear registro
                 cursor.execute("""
                     INSERT INTO sd_configuraciones (inventario_id, config_final, fecha_configuracion)
                     VALUES (?, ?, date('now'))
                 """, (item_id, format_fecha(sd_config_final)))
         
         # Actualizar configuración de dispositivo si aplica
-        if tipo == 'DISPOSITIVO':
-            # Verificar si existe configuración
+        if tipo == 'DISPOSITIVO' and (disp_fecha_config_inicio is not None or disp_fecha_config_final is not None):
             cursor.execute("SELECT id FROM dispositivo_configuraciones WHERE inventario_id = ?", (item_id,))
             config = cursor.fetchone()
             
-            if disp_fecha_config_inicio is not None or disp_fecha_config_final is not None:
-                # Validar coherencia de fechas
-                fecha_inicio = disp_fecha_config_inicio
-                fecha_final = disp_fecha_config_final
+            if config:
+                updates_disp = []
+                params_disp = []
                 
-                # Obtener fechas actuales si no se proporcionan
-                if config:
-                    if fecha_inicio is None:
-                        cursor.execute("SELECT fecha_config_inicio FROM dispositivo_configuraciones WHERE inventario_id = ?", (item_id,))
-                        fecha_inicio_row = cursor.fetchone()
-                        fecha_inicio = fecha_inicio_row['fecha_config_inicio'] if fecha_inicio_row else None
-                    
-                    if fecha_final is None:
-                        cursor.execute("SELECT fecha_config_final FROM dispositivo_configuraciones WHERE inventario_id = ?", (item_id,))
-                        fecha_final_row = cursor.fetchone()
-                        fecha_final = fecha_final_row['fecha_config_final'] if fecha_final_row else None
+                if disp_fecha_config_inicio is not None:
+                    updates_disp.append("fecha_config_inicio = ?")
+                    params_disp.append(format_fecha(disp_fecha_config_inicio))
                 
-                # Validar que inicio no sea posterior a final
-                if fecha_inicio and fecha_final:
-                    # Convertir a date si son strings
-                    if isinstance(fecha_inicio, str):
-                        fecha_inicio = datetime.strptime(fecha_inicio, "%Y-%m-%d").date()
-                    if isinstance(fecha_final, str):
-                        fecha_final = datetime.strptime(fecha_final, "%Y-%m-%d").date()
-                    
-                    if fecha_inicio > fecha_final:
-                        raise ValueError("La fecha de inicio no puede ser posterior a la fecha final")
+                if disp_fecha_config_final is not None:
+                    updates_disp.append("fecha_config_final = ?")
+                    params_disp.append(format_fecha(disp_fecha_config_final))
+                    updates_disp.append("fecha_finalizacion_accion = CURRENT_TIMESTAMP")
                 
-                if config:
-                    # Actualizar existente
-                    updates_disp = []
-                    params_disp = []
-                    
-                    if disp_fecha_config_inicio is not None:
-                        updates_disp.append("fecha_config_inicio = ?")
-                        params_disp.append(format_fecha(disp_fecha_config_inicio))
-                    
-                    if disp_fecha_config_final is not None:
-                        updates_disp.append("fecha_config_final = ?")
-                        params_disp.append(format_fecha(disp_fecha_config_final))
-                        updates_disp.append("fecha_finalizacion_accion = CURRENT_TIMESTAMP")
-                    
-                    if updates_disp:
-                        params_disp.append(item_id)
-                        cursor.execute(f"""
-                            UPDATE dispositivo_configuraciones 
-                            SET {', '.join(updates_disp)} 
-                            WHERE inventario_id = ?
-                        """, params_disp)
-                else:
-                    # Crear nueva configuración solo si hay fechas
-                    if disp_fecha_config_inicio:
-                        cursor.execute("""
-                            INSERT INTO dispositivo_configuraciones 
-                            (inventario_id, fecha_config_inicio, fecha_config_final, fecha_finalizacion_accion)
-                            VALUES (?, ?, ?, 
-                                CASE WHEN ? IS NOT NULL THEN CURRENT_TIMESTAMP ELSE NULL END)
-                        """, (
-                            item_id, 
-                            format_fecha(disp_fecha_config_inicio),
-                            format_fecha(disp_fecha_config_final) if disp_fecha_config_final else None,
-                            disp_fecha_config_final
-                        ))
+                if updates_disp:
+                    params_disp.append(item_id)
+                    cursor.execute(f"""
+                        UPDATE dispositivo_configuraciones 
+                        SET {', '.join(updates_disp)} 
+                        WHERE inventario_id = ?
+                    """, params_disp)
+            else:
+                if disp_fecha_config_inicio:
+                    cursor.execute("""
+                        INSERT INTO dispositivo_configuraciones 
+                        (inventario_id, fecha_config_inicio, fecha_config_final, fecha_finalizacion_accion)
+                        VALUES (?, ?, ?, 
+                            CASE WHEN ? IS NOT NULL THEN CURRENT_TIMESTAMP ELSE NULL END)
+                    """, (
+                        item_id, 
+                        format_fecha(disp_fecha_config_inicio),
+                        format_fecha(disp_fecha_config_final) if disp_fecha_config_final else None,
+                        disp_fecha_config_final
+                    ))
         
         conn.commit()
         return True
@@ -548,32 +575,52 @@ def actualizar_item_completo(
 def marcar_como_defectuoso(item_id: int) -> bool:
     """
     Marca un item como defectuoso.
-    Si tiene configuraciones, las elimina.
+    Dependiendo del tipo, maneja las configuraciones apropiadamente.
     """
     with get_connection(read_only=False) as conn:
         cursor = conn.cursor()
         
-        # Verificar que el item existe y no está enviado
-        cursor.execute("SELECT estado FROM inventario WHERE id = ?", (item_id,))
-        item = cursor.fetchone()
+        # Verificar que el item existe
+        cursor.execute("""
+            SELECT i.estado, i.producto_id, p.tipo 
+            FROM inventario i
+            JOIN productos p ON i.producto_id = p.id
+            WHERE i.id = ?
+        """, (item_id,))
         
+        item = cursor.fetchone()
         if not item:
             raise ValueError("El item no existe")
         
         if item['estado'] == 'ENVIADO':
             raise ValueError("No se puede marcar como defectuoso un item ya enviado")
         
-        # Eliminar configuraciones asociadas
-        cursor.execute("DELETE FROM dispositivo_configuraciones WHERE inventario_id = ?", (item_id,))
-        cursor.execute("DELETE FROM sd_configuraciones WHERE inventario_id = ?", (item_id,))
+        tipo = item['tipo']
         
-        # Cambiar estado
-        cursor.execute("UPDATE inventario SET estado = 'DEFECTUOSO' WHERE id = ?", (item_id,))
+        # Manejar configuraciones según el tipo
+        if tipo == 'DISPOSITIVO':
+            # Para dispositivos, verificamos si hay configuración
+            cursor.execute("SELECT id FROM dispositivo_configuraciones WHERE inventario_id = ?", (item_id,))
+            if cursor.fetchone():
+                # Pregunta: ¿Eliminar o conservar? Decidí conservar para auditoría
+                # pero marcamos que el dispositivo está defectuoso
+                pass  # No eliminamos, conservamos historial
+        elif tipo == 'SD':
+            # Para SDs, similar
+            cursor.execute("SELECT id FROM sd_configuraciones WHERE inventario_id = ?", (item_id,))
+            if cursor.fetchone():
+                pass  # Conservamos historial
+        # Para cables, no hay configuraciones que manejar
+        
+        # Registrar fecha en que se marcó como defectuoso
+        cursor.execute("""
+            UPDATE inventario 
+            SET estado = 'DEFECTUOSO', fecha_defectuoso = CURRENT_TIMESTAMP 
+            WHERE id = ?
+        """, (item_id,))
         
         conn.commit()
         return True
-
-
 
 def iniciar_configuracion_dispositivo(inventario_id: int, fecha_config_inicio) -> bool:
     """Inicia el proceso de configuración de un dispositivo"""
@@ -593,6 +640,8 @@ def iniciar_configuracion_dispositivo(inventario_id: int, fecha_config_inicio) -
         
         if item['tipo'] != 'DISPOSITIVO':
             raise ValueError("Solo se pueden configurar dispositivos")
+        
+        validar_fecha_no_futura(fecha_config_inicio, "Fecha de reinicio")
         
         # Verificar que no tenga ya una configuración iniciada
         cursor.execute("""
@@ -622,24 +671,24 @@ def finalizar_configuracion_dispositivo(inventario_id: int, fecha_config_final) 
         
         # Verificar que el dispositivo está en proceso de reinicio
         cursor.execute("""
-            SELECT i.* FROM inventario i
-            WHERE i.id = ? AND i.estado = 'REINICIADO'
+            SELECT i.*, dc.fecha_config_inicio 
+            FROM inventario i
+            JOIN dispositivo_configuraciones dc ON i.id = dc.inventario_id
+            WHERE i.id = ? AND i.estado = 'REINICIADO' AND dc.fecha_config_final IS NULL
         """, (inventario_id,))
         
         item = cursor.fetchone()
         if not item:
-            raise ValueError("El dispositivo no está en proceso de reinicio")
+            raise ValueError("El dispositivo no está en proceso de reinicio o ya fue configurado")
         
-        # Verificar que existe la configuración
-        cursor.execute("""
-            SELECT id FROM dispositivo_configuraciones 
-            WHERE inventario_id = ? AND fecha_config_final IS NULL
-        """, (inventario_id,))
+        validar_fecha_no_futura(fecha_config_final, "Fecha de configuración final")
         
-        if not cursor.fetchone():
-            raise ValueError("No hay una configuración activa para este dispositivo")
+        # Validar que la fecha final no sea anterior a la fecha de inicio
+        fecha_inicio = parse_fecha(item['fecha_config_inicio'])
+        if fecha_inicio and fecha_inicio > fecha_config_final:
+            raise ValueError("La fecha de finalización no puede ser anterior a la fecha de inicio")
         
-        # Actualizar configuración con fecha final y timestamp de acción
+        # Actualizar configuración
         cursor.execute("""
             UPDATE dispositivo_configuraciones 
             SET 
@@ -674,6 +723,8 @@ def configurar_sd(inventario_id: int, config_final) -> bool:
         if item['tipo'] != 'SD':
             raise ValueError("Solo se pueden configurar tarjetas SD")
         
+        validar_fecha_no_futura(config_final, "Fecha de configuración")
+        
         # Verificar que no tenga ya una configuración
         cursor.execute("""
             SELECT id FROM sd_configuraciones 
@@ -696,7 +747,9 @@ def configurar_sd(inventario_id: int, config_final) -> bool:
         
         return True
 
-# ========== FUNCIONES PARA EDITAR/ELIMINAR EN INVENTARIO ==========
+# ========== FUNCIÓN ELIMINADA: actualizar_item_inventario (duplicada) ==========
+# La función anterior ha sido eliminada. Usar actualizar_item() en su lugar.
+
 def eliminar_item_inventario(item_id: int) -> bool:
     """
     Elimina un item del inventario y sus configuraciones asociadas.
@@ -738,6 +791,11 @@ def procesar_envio(items: List[Dict[str, int]], folio: str, destino: str = "",
     """
     if not fecha_salida:
         fecha_salida = datetime.now().date()
+    else:
+        validar_fecha_no_futura(fecha_salida, "Fecha de salida")
+    
+    if not folio or not folio.strip():
+        raise ValueError("El folio es obligatorio")
     
     with get_connection(read_only=False) as conn:
         cursor = conn.cursor()
@@ -749,7 +807,13 @@ def procesar_envio(items: List[Dict[str, int]], folio: str, destino: str = "",
             producto_id = req['producto_id']
             cantidad_necesaria = req['cantidad']
             
-            # Obtener items disponibles para envío (bloqueados por la transacción)
+            # Verificar que el producto existe
+            cursor.execute("SELECT nombre FROM productos WHERE id = ?", (producto_id,))
+            producto = cursor.fetchone()
+            if not producto:
+                raise ValueError(f"El producto con ID {producto_id} no existe")
+            
+            # Obtener items disponibles para envío
             cursor.execute("""
                 SELECT i.id, p.tipo, p.nombre as producto_nombre,
                        dc.fecha_config_final as disp_fecha_final,
@@ -774,7 +838,7 @@ def procesar_envio(items: List[Dict[str, int]], folio: str, destino: str = "",
             
             if len(disponibles) < cantidad_necesaria:
                 raise ValueError(
-                    f"Stock insuficiente para {disponibles[0]['producto_nombre'] if disponibles else 'el producto'}. "
+                    f"Stock insuficiente para {producto['nombre']}. "
                     f"Requerido: {cantidad_necesaria}, Disponible: {len(disponibles)}"
                 )
             
@@ -798,10 +862,16 @@ def procesar_envio(items: List[Dict[str, int]], folio: str, destino: str = "",
                 })
         
         # Crear el envío
-        cursor.execute("""
-            INSERT INTO envios (folio, fecha_salida, destino, descripcion)
-            VALUES (?, ?, ?, ?)
-        """, (folio, format_fecha(fecha_salida), destino, descripcion))
+        try:
+            cursor.execute("""
+                INSERT INTO envios (folio, fecha_salida, destino, descripcion)
+                VALUES (?, ?, ?, ?)
+            """, (folio.strip(), format_fecha(fecha_salida), destino, descripcion))
+        except sqlite3.IntegrityError as e:
+            if "UNIQUE constraint failed" in str(e):
+                raise ValueError(f"Ya existe un envío con el folio '{folio}'")
+            raise ValueError(f"Error al crear el envío: {str(e)}")
+        
         envio_id = cursor.lastrowid
         
         # Marcar items como enviados y crear detalle
@@ -894,7 +964,7 @@ def get_metricas() -> Dict[str, int]:
         """)
         metricas['dispositivos_reiniciados'] = cursor.fetchone()[0]
         
-        # Dispositivos defectuosos (solo dispositivos)
+        # Dispositivos defectuosos
         cursor.execute("""
             SELECT COUNT(*)
             FROM inventario i
